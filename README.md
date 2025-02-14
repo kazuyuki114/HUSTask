@@ -80,16 +80,16 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 
 ---
 
-## Installation & Setup
+# Installation & Setup
 
-# Prerequisites
+## Prerequisites
 
 - [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - [Node.js](https://nodejs.org/) (LTS version recommended)
 - [PostgreSQL](https://www.postgresql.org/download/)
 - [Git](https://git-scm.com/downloads)
 
-# Backend Setup
+## Backend Setup
 
 1. Navigate to the backend directory:
 ```bash
@@ -168,7 +168,7 @@ CREATE DATABASE your_database_name;
 psql -U postgres -d your_database_name < path_to_your_dump.sql
 ```
 
-## Step 2: Using Entity Framework Migrations
+### Step 2: Using Entity Framework Migrations
 
 If starting fresh:
 
