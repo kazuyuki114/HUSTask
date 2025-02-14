@@ -60,23 +60,6 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 
 ---
 
-## User Stories
-
-### 1. As a **Team Member**:
-- I want to view all tasks assigned to me so I can focus on my responsibilities.
-- I want to update the status of my tasks to reflect my progress.
-
-### 2. As a **Project Leader**:
-- I want to assign tasks to team members so they know what to work on.
-- I want to monitor task progress to ensure project timelines are met.
-- I can add comments for team members on the tasks they’re dealing with.
-
-### 3. As an **Individual User**:
-- I want to manage my personal tasks without being part of a team.
-- I want to prioritize and track my tasks to improve productivity.
-
----
-
 # Installation & Setup
 
 ## Prerequisites
@@ -85,12 +68,15 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 - [Node.js](https://nodejs.org/) (LTS version recommended)
 - [PostgreSQL](https://www.postgresql.org/download/)
 - [Git](https://git-scm.com/downloads)
-
+## Clone the project 
+```bash
+git clone https://github.com/your-username/HUSTask.git
+cd HUSTask
+```
 ## Backend Setup
-
 1. Navigate to the backend directory:
 ```bash
-cd backend/backend
+cd BackEnd/BackEnd
 ```
 
 2. Install .NET dependencies:
@@ -129,7 +115,7 @@ The API will be available at `https://localhost:7001` (or similar port)
 
 1. Navigate to the frontend directory:
 ```bash
-cd frontend
+cd FrontEnd
 ```
 
 2. Install dependencies:
@@ -137,16 +123,11 @@ cd frontend
 npm install
 ```
 
-3. Create a `.env` file in the frontend directory:
-```env
-VITE_API_URL=https://localhost:7001/api
-```
-
-4. Run the development server:
+3. Run the development server:
 ```bash
 npm run dev
 ```
-The frontend will be available at `http://localhost:5173`
+The frontend will be available at `http://localhost:3000`
 
 # Database Setup
 
