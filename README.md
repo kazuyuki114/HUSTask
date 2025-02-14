@@ -93,7 +93,7 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 
 1. Navigate to the backend directory:
 ```bash
-cd backend
+cd backend/backend
 ```
 
 2. Install .NET dependencies:
