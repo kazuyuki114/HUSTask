@@ -143,7 +143,7 @@ CREATE DATABASE your_database_name;
 
 2. Import the database:
 ```bash
-psql -U postgres -d your_database_name < path_to_your_dump.sql
+psql -U postgres -d your_database_name < path_to_test.sql>
 ```
 
 ### Step 2: Using Entity Framework Migrations
