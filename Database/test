@@ -1,0 +1,3054 @@
+--
+-- PostgreSQL database dump
+--
+
+-- Dumped from database version 16.6 (Ubuntu 16.6-1.pgdg22.04+1)
+-- Dumped by pg_dump version 16.6 (Ubuntu 16.6-1.pgdg22.04+1)
+
+-- Started on 2025-02-15 01:16:22 +07
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+DROP DATABASE IF EXISTS test;
+--
+-- TOC entry 3628 (class 1262 OID 16388)
+-- Name: test; Type: DATABASE; Schema: -; Owner: postgres
+--
+
+CREATE DATABASE test WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = libc LOCALE = 'en_US.UTF-8';
+
+
+ALTER DATABASE test OWNER TO postgres;
+
+\connect test
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- TOC entry 5 (class 2615 OID 16718)
+-- Name: timetable; Type: SCHEMA; Schema: -; Owner: scheduler
+--
+
+CREATE SCHEMA timetable;
+
+
+ALTER SCHEMA timetable OWNER TO scheduler;
+
+--
+-- TOC entry 944 (class 1247 OID 16752)
+-- Name: command_kind; Type: TYPE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TYPE timetable.command_kind AS ENUM (
+    'SQL',
+    'PROGRAM',
+    'BUILTIN'
+);
+
+
+ALTER TYPE timetable.command_kind OWNER TO scheduler;
+
+--
+-- TOC entry 252 (class 1255 OID 16726)
+-- Name: cron_split_to_arrays(text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.cron_split_to_arrays(cron text, OUT mins integer[], OUT hours integer[], OUT days integer[], OUT months integer[], OUT dow integer[]) RETURNS record
+    LANGUAGE plpgsql STRICT
+    AS $_$
+DECLARE
+    a_element text[];
+    i_index integer;
+    a_tmp text[];
+    tmp_item text;
+    a_range int[];
+    a_split text[];
+    a_res integer[];
+    max_val integer;
+    min_val integer;
+    dimensions constant text[] = '{"minutes", "hours", "days", "months", "days of week"}';
+    allowed_ranges constant integer[][] = '{{0,59},{0,23},{1,31},{1,12},{0,7}}';
+BEGIN
+    a_element := regexp_split_to_array(cron, '\s+');
+    FOR i_index IN 1..5 LOOP
+        a_res := NULL;
+        a_tmp := string_to_array(a_element[i_index],',');
+        FOREACH  tmp_item IN ARRAY a_tmp LOOP
+            IF tmp_item ~ '^[0-9]+$' THEN -- normal integer
+                a_res := array_append(a_res, tmp_item::int);
+            ELSIF tmp_item ~ '^[*]+$' THEN -- '*' any value
+                a_range := array(select generate_series(allowed_ranges[i_index][1], allowed_ranges[i_index][2]));
+                a_res := array_cat(a_res, a_range);
+            ELSIF tmp_item ~ '^[0-9]+[-][0-9]+$' THEN -- '-' range of values
+                a_range := regexp_split_to_array(tmp_item, '-');
+                a_range := array(select generate_series(a_range[1], a_range[2]));
+                a_res := array_cat(a_res, a_range);
+            ELSIF tmp_item ~ '^[0-9]+[\/][0-9]+$' THEN -- '/' step values
+                a_range := regexp_split_to_array(tmp_item, '/');
+                a_range := array(select generate_series(a_range[1], allowed_ranges[i_index][2], a_range[2]));
+                a_res := array_cat(a_res, a_range);
+            ELSIF tmp_item ~ '^[0-9-]+[\/][0-9]+$' THEN -- '-' range of values and '/' step values
+                a_split := regexp_split_to_array(tmp_item, '/');
+                a_range := regexp_split_to_array(a_split[1], '-');
+                a_range := array(select generate_series(a_range[1], a_range[2], a_split[2]::int));
+                a_res := array_cat(a_res, a_range);
+            ELSIF tmp_item ~ '^[*]+[\/][0-9]+$' THEN -- '*' any value and '/' step values
+                a_split := regexp_split_to_array(tmp_item, '/');
+                a_range := array(select generate_series(allowed_ranges[i_index][1], allowed_ranges[i_index][2], a_split[2]::int));
+                a_res := array_cat(a_res, a_range);
+            ELSE
+                RAISE EXCEPTION 'Value ("%") not recognized', a_element[i_index]
+                    USING HINT = 'fields separated by space or tab.'+
+                       'Values allowed: numbers (value list with ","), '+
+                    'any value with "*", range of value with "-" and step values with "/"!';
+            END IF;
+        END LOOP;
+        SELECT
+           ARRAY_AGG(x.val), MIN(x.val), MAX(x.val) INTO a_res, min_val, max_val
+        FROM (
+            SELECT DISTINCT UNNEST(a_res) AS val ORDER BY val) AS x;
+        IF max_val > allowed_ranges[i_index][2] OR min_val < allowed_ranges[i_index][1] OR a_res IS NULL THEN
+            RAISE EXCEPTION '% is out of range % for %', tmp_item, allowed_ranges[i_index:i_index][:], dimensions[i_index];
+        END IF;
+        CASE i_index
+            WHEN 1 THEN mins := a_res;
+            WHEN 2 THEN hours := a_res;
+            WHEN 3 THEN days := a_res;
+            WHEN 4 THEN months := a_res;
+        ELSE
+            dow := a_res;
+        END CASE;
+    END LOOP;
+    RETURN;
+END;
+$_$;
+
+
+ALTER FUNCTION timetable.cron_split_to_arrays(cron text, OUT mins integer[], OUT hours integer[], OUT days integer[], OUT months integer[], OUT dow integer[]) OWNER TO scheduler;
+
+--
+-- TOC entry 937 (class 1247 OID 16732)
+-- Name: cron; Type: DOMAIN; Schema: timetable; Owner: scheduler
+--
+
+CREATE DOMAIN timetable.cron AS text
+	CONSTRAINT cron_check CHECK (((VALUE = '@reboot'::text) OR ((substr(VALUE, 1, 6) = ANY (ARRAY['@every'::text, '@after'::text])) AND ((substr(VALUE, 7))::interval IS NOT NULL)) OR ((VALUE ~ '^(((\d+,)+\d+|(\d+(\/|-)\d+)|(\*(\/|-)\d+)|\d+|\*) +){4}(((\d+,)+\d+|(\d+(\/|-)\d+)|(\*(\/|-)\d+)|\d+|\*) ?)$'::text) AND (timetable.cron_split_to_arrays(VALUE) IS NOT NULL))));
+
+
+ALTER DOMAIN timetable.cron OWNER TO scheduler;
+
+--
+-- TOC entry 3631 (class 0 OID 0)
+-- Dependencies: 937
+-- Name: DOMAIN cron; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON DOMAIN timetable.cron IS 'Extended CRON-style notation with support of interval values';
+
+
+--
+-- TOC entry 956 (class 1247 OID 16797)
+-- Name: log_type; Type: TYPE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TYPE timetable.log_type AS ENUM (
+    'DEBUG',
+    'NOTICE',
+    'INFO',
+    'ERROR',
+    'PANIC',
+    'USER'
+);
+
+
+ALTER TYPE timetable.log_type OWNER TO scheduler;
+
+--
+-- TOC entry 284 (class 1255 OID 16843)
+-- Name: add_task_and_update_status(text, text, integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.add_task_and_update_status(job_kind text, job_command text, task_id_param integer, order_increment integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    new_task_id INTEGER;
+BEGIN
+    -- Update the status of the existing task to 'overdue' if due date is in the past
+    UPDATE public.task
+    SET status = 'overdue', updated_at = CURRENT_TIMESTAMP
+    WHERE id = task_id_param AND status = 'pending' AND due_date < CURRENT_DATE;
+
+    -- Insert a new task based on the existing task
+    INSERT INTO public.task (title, description, status, due_date, priority_id)
+    SELECT title, description, job_kind, CURRENT_DATE + INTERVAL '1 day', priority_id
+    FROM public.task
+    WHERE id = task_id_param
+    RETURNING id INTO new_task_id;
+
+    -- Return the ID of the newly created task
+    RETURN new_task_id;
+END;
+$$;
+
+
+ALTER FUNCTION public.add_task_and_update_status(job_kind text, job_command text, task_id_param integer, order_increment integer) OWNER TO postgres;
+
+--
+-- TOC entry 250 (class 1255 OID 16678)
+-- Name: set_created_at(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.set_created_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.created_at = COALESCE(NEW.created_at, CURRENT_TIMESTAMP);
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.set_created_at() OWNER TO postgres;
+
+--
+-- TOC entry 251 (class 1255 OID 16680)
+-- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.set_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.updated_at = CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.set_updated_at() OWNER TO postgres;
+
+--
+-- TOC entry 254 (class 1255 OID 16830)
+-- Name: _validate_json_schema_type(text, jsonb); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable._validate_json_schema_type(type text, data jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE
+    AS $$
+BEGIN
+  IF type = 'integer' THEN
+    IF jsonb_typeof(data) != 'number' THEN
+      RETURN false;
+    END IF;
+    IF trunc(data::text::numeric) != data::text::numeric THEN
+      RETURN false;
+    END IF;
+  ELSE
+    IF type != jsonb_typeof(data) THEN
+      RETURN false;
+    END IF;
+  END IF;
+  RETURN true;
+END;
+$$;
+
+
+ALTER FUNCTION timetable._validate_json_schema_type(type text, data jsonb) OWNER TO scheduler;
+
+--
+-- TOC entry 280 (class 1255 OID 16834)
+-- Name: add_job(text, timetable.cron, text, jsonb, timetable.command_kind, text, integer, boolean, boolean, boolean, boolean, text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.add_job(job_name text, job_schedule timetable.cron, job_command text, job_parameters jsonb DEFAULT NULL::jsonb, job_kind timetable.command_kind DEFAULT 'SQL'::timetable.command_kind, job_client_name text DEFAULT NULL::text, job_max_instances integer DEFAULT NULL::integer, job_live boolean DEFAULT true, job_self_destruct boolean DEFAULT false, job_ignore_errors boolean DEFAULT true, job_exclusive boolean DEFAULT false, job_on_error text DEFAULT NULL::text) RETURNS bigint
+    LANGUAGE sql
+    AS $$
+    WITH 
+        cte_chain (v_chain_id) AS (
+            INSERT INTO timetable.chain (chain_name, run_at, max_instances, live, self_destruct, client_name, exclusive_execution, on_error) 
+            VALUES (job_name, job_schedule,job_max_instances, job_live, job_self_destruct, job_client_name, job_exclusive, job_on_error)
+            RETURNING chain_id
+        ),
+        cte_task(v_task_id) AS (
+            INSERT INTO timetable.task (chain_id, task_order, kind, command, ignore_error, autonomous)
+            SELECT v_chain_id, 10, job_kind, job_command, job_ignore_errors, TRUE
+            FROM cte_chain
+            RETURNING task_id
+        ),
+        cte_param AS (
+            INSERT INTO timetable.parameter (task_id, order_id, value)
+            SELECT v_task_id, 1, job_parameters FROM cte_task, cte_chain
+        )
+        SELECT v_chain_id FROM cte_chain
+$$;
+
+
+ALTER FUNCTION timetable.add_job(job_name text, job_schedule timetable.cron, job_command text, job_parameters jsonb, job_kind timetable.command_kind, job_client_name text, job_max_instances integer, job_live boolean, job_self_destruct boolean, job_ignore_errors boolean, job_exclusive boolean, job_on_error text) OWNER TO scheduler;
+
+--
+-- TOC entry 3632 (class 0 OID 0)
+-- Dependencies: 280
+-- Name: FUNCTION add_job(job_name text, job_schedule timetable.cron, job_command text, job_parameters jsonb, job_kind timetable.command_kind, job_client_name text, job_max_instances integer, job_live boolean, job_self_destruct boolean, job_ignore_errors boolean, job_exclusive boolean, job_on_error text); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.add_job(job_name text, job_schedule timetable.cron, job_command text, job_parameters jsonb, job_kind timetable.command_kind, job_client_name text, job_max_instances integer, job_live boolean, job_self_destruct boolean, job_ignore_errors boolean, job_exclusive boolean, job_on_error text) IS 'Add one-task chain (aka job) to the system';
+
+
+--
+-- TOC entry 265 (class 1255 OID 16841)
+-- Name: add_task(text, text, integer, integer); Type: FUNCTION; Schema: timetable; Owner: postgres
+--
+
+CREATE FUNCTION timetable.add_task(job_kind text, job_command text, task_id integer, order_increment integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    new_task_id INTEGER;
+BEGIN
+    INSERT INTO timetable.task (chain_id, task_order, kind, command) 
+    SELECT chain_id, task_order + order_increment, job_kind, job_command
+    FROM timetable.task
+    WHERE task_id = task_id
+    RETURNING task_id INTO new_task_id;
+
+    RETURN new_task_id;
+END;
+$$;
+
+
+ALTER FUNCTION timetable.add_task(job_kind text, job_command text, task_id integer, order_increment integer) OWNER TO postgres;
+
+--
+-- TOC entry 279 (class 1255 OID 16833)
+-- Name: add_task(timetable.command_kind, text, bigint, double precision); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.add_task(kind timetable.command_kind, command text, parent_id bigint, order_delta double precision DEFAULT 10) RETURNS bigint
+    LANGUAGE sql
+    AS $_$
+    INSERT INTO timetable.task (chain_id, task_order, kind, command) 
+	SELECT chain_id, task_order + $4, $1, $2 FROM timetable.task WHERE task_id = $3
+	RETURNING task_id
+$_$;
+
+
+ALTER FUNCTION timetable.add_task(kind timetable.command_kind, command text, parent_id bigint, order_delta double precision) OWNER TO scheduler;
+
+--
+-- TOC entry 3633 (class 0 OID 0)
+-- Dependencies: 279
+-- Name: FUNCTION add_task(kind timetable.command_kind, command text, parent_id bigint, order_delta double precision); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.add_task(kind timetable.command_kind, command text, parent_id bigint, order_delta double precision) IS 'Add a task to the same chain as the task with parent_id';
+
+
+--
+-- TOC entry 270 (class 1255 OID 16842)
+-- Name: add_task_and_update_status(text, text, integer, integer); Type: FUNCTION; Schema: timetable; Owner: postgres
+--
+
+CREATE FUNCTION timetable.add_task_and_update_status(job_kind text, job_command text, task_id integer, order_increment integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    new_task_id INTEGER;
+BEGIN
+    -- Update the status of the existing task to 'overdue' if due date is in the past
+    UPDATE timetable.task
+    SET status = 'overdue', updated_at = CURRENT_TIMESTAMP
+    WHERE task_id = task_id AND status = 'pending' AND due_date < CURRENT_DATE;
+
+    -- Insert a new task based on the existing task
+    INSERT INTO timetable.task (chain_id, task_order, kind, command) 
+    SELECT chain_id, task_order + order_increment, job_kind, job_command
+    FROM timetable.task
+    WHERE task_id = task_id
+    RETURNING task_id INTO new_task_id;
+
+    -- Return the ID of the newly created task
+    RETURN new_task_id;
+END;
+$$;
+
+
+ALTER FUNCTION timetable.add_task_and_update_status(job_kind text, job_command text, task_id integer, order_increment integer) OWNER TO postgres;
+
+--
+-- TOC entry 256 (class 1255 OID 16728)
+-- Name: cron_days(timestamp with time zone, integer[], integer[], integer[]); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.cron_days(from_ts timestamp with time zone, allowed_months integer[], allowed_days integer[], allowed_week_days integer[]) RETURNS SETOF timestamp with time zone
+    LANGUAGE sql STRICT
+    AS $$
+    WITH
+    ad(ad) AS (SELECT UNNEST(allowed_days)),
+    am(am) AS (SELECT * FROM timetable.cron_months(from_ts, allowed_months)),
+    gend(ts) AS ( --generated days
+        SELECT date_trunc('day', ts)
+        FROM am,
+            pg_catalog.generate_series(am.am, am.am + INTERVAL '1 month'
+                - INTERVAL '1 day',  -- don't include the same day of the next month
+                INTERVAL '1 day') g(ts)
+    )
+    SELECT ts
+    FROM gend JOIN ad ON date_part('day', gend.ts) = ad.ad
+    WHERE extract(dow from ts)=ANY(allowed_week_days)
+$$;
+
+
+ALTER FUNCTION timetable.cron_days(from_ts timestamp with time zone, allowed_months integer[], allowed_days integer[], allowed_week_days integer[]) OWNER TO scheduler;
+
+--
+-- TOC entry 253 (class 1255 OID 16727)
+-- Name: cron_months(timestamp with time zone, integer[]); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.cron_months(from_ts timestamp with time zone, allowed_months integer[]) RETURNS SETOF timestamp with time zone
+    LANGUAGE sql STRICT
+    AS $$
+    WITH
+    am(am) AS (SELECT UNNEST(allowed_months)),
+    genm(ts) AS ( --generated months
+        SELECT date_trunc('month', ts)
+        FROM pg_catalog.generate_series(from_ts, from_ts + INTERVAL '1 year', INTERVAL '1 month') g(ts)
+    )
+    SELECT ts FROM genm JOIN am ON date_part('month', genm.ts) = am.am
+$$;
+
+
+ALTER FUNCTION timetable.cron_months(from_ts timestamp with time zone, allowed_months integer[]) OWNER TO scheduler;
+
+--
+-- TOC entry 258 (class 1255 OID 16730)
+-- Name: cron_runs(timestamp with time zone, text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.cron_runs(from_ts timestamp with time zone, cron text) RETURNS SETOF timestamp with time zone
+    LANGUAGE sql STRICT
+    AS $$
+    SELECT cd + ct
+    FROM
+        timetable.cron_split_to_arrays(cron) a,
+        timetable.cron_times(a.hours, a.mins) ct CROSS JOIN
+        timetable.cron_days(from_ts, a.months, a.days, a.dow) cd
+    WHERE cd + ct > from_ts
+    ORDER BY 1 ASC;
+$$;
+
+
+ALTER FUNCTION timetable.cron_runs(from_ts timestamp with time zone, cron text) OWNER TO scheduler;
+
+--
+-- TOC entry 257 (class 1255 OID 16729)
+-- Name: cron_times(integer[], integer[]); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.cron_times(allowed_hours integer[], allowed_minutes integer[]) RETURNS SETOF time without time zone
+    LANGUAGE sql STRICT
+    AS $$
+    WITH
+    ah(ah) AS (SELECT UNNEST(allowed_hours)),
+    am(am) AS (SELECT UNNEST(allowed_minutes))
+    SELECT make_time(ah.ah, am.am, 0) FROM ah CROSS JOIN am
+$$;
+
+
+ALTER FUNCTION timetable.cron_times(allowed_hours integer[], allowed_minutes integer[]) OWNER TO scheduler;
+
+--
+-- TOC entry 263 (class 1255 OID 16839)
+-- Name: delete_job(text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.delete_job(job_name text) RETURNS boolean
+    LANGUAGE sql
+    AS $_$
+    WITH del_chain AS (DELETE FROM timetable.chain WHERE chain.chain_name = $1 RETURNING chain_id)
+    SELECT EXISTS(SELECT 1 FROM del_chain)
+$_$;
+
+
+ALTER FUNCTION timetable.delete_job(job_name text) OWNER TO scheduler;
+
+--
+-- TOC entry 3634 (class 0 OID 0)
+-- Dependencies: 263
+-- Name: FUNCTION delete_job(job_name text); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.delete_job(job_name text) IS 'Delete the chain and its tasks from the system';
+
+
+--
+-- TOC entry 264 (class 1255 OID 16840)
+-- Name: delete_task(bigint); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.delete_task(task_id bigint) RETURNS boolean
+    LANGUAGE sql
+    AS $_$
+    WITH del_task AS (DELETE FROM timetable.task WHERE task_id = $1 RETURNING task_id)
+    SELECT EXISTS(SELECT 1 FROM del_task)
+$_$;
+
+
+ALTER FUNCTION timetable.delete_task(task_id bigint) OWNER TO scheduler;
+
+--
+-- TOC entry 3635 (class 0 OID 0)
+-- Dependencies: 264
+-- Name: FUNCTION delete_task(task_id bigint); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.delete_task(task_id bigint) IS 'Delete the task from a chain';
+
+
+--
+-- TOC entry 261 (class 1255 OID 16809)
+-- Name: get_client_name(integer); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.get_client_name(integer) RETURNS text
+    LANGUAGE sql
+    AS $_$
+    SELECT client_name FROM timetable.active_session WHERE server_pid = $1 LIMIT 1
+$_$;
+
+
+ALTER FUNCTION timetable.get_client_name(integer) OWNER TO scheduler;
+
+--
+-- TOC entry 259 (class 1255 OID 16734)
+-- Name: is_cron_in_time(timetable.cron, timestamp with time zone); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.is_cron_in_time(run_at timetable.cron, ts timestamp with time zone) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+    SELECT
+    CASE WHEN run_at IS NULL THEN
+        TRUE
+    ELSE
+        date_part('month', ts) = ANY(a.months)
+        AND (date_part('dow', ts) = ANY(a.dow) OR date_part('isodow', ts) = ANY(a.dow))
+        AND date_part('day', ts) = ANY(a.days)
+        AND date_part('hour', ts) = ANY(a.hours)
+        AND date_part('minute', ts) = ANY(a.mins)
+    END
+    FROM
+        timetable.cron_split_to_arrays(run_at) a
+$$;
+
+
+ALTER FUNCTION timetable.is_cron_in_time(run_at timetable.cron, ts timestamp with time zone) OWNER TO scheduler;
+
+--
+-- TOC entry 262 (class 1255 OID 16838)
+-- Name: move_task_down(bigint); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.move_task_down(task_id bigint) RETURNS boolean
+    LANGUAGE sql
+    AS $_$
+	WITH current_task (ct_chain_id, ct_id, ct_order) AS (
+		SELECT chain_id, task_id, task_order FROM timetable.task WHERE task_id = $1
+	),
+	tasks(t_id, t_new_order) AS (
+		SELECT task_id, COALESCE(LAG(task_order) OVER w, LEAD(task_order) OVER w)
+		FROM timetable.task t, current_task ct
+		WHERE chain_id = ct_chain_id AND (task_order > ct_order OR task_id = ct_id)
+		WINDOW w AS (PARTITION BY chain_id ORDER BY ABS(task_order - ct_order))
+		LIMIT 2
+	),
+	upd AS (
+		UPDATE timetable.task t SET task_order = t_new_order
+		FROM tasks WHERE tasks.t_id = t.task_id AND tasks.t_new_order IS NOT NULL
+		RETURNING true
+	)
+	SELECT COUNT(*) > 0 FROM upd
+$_$;
+
+
+ALTER FUNCTION timetable.move_task_down(task_id bigint) OWNER TO scheduler;
+
+--
+-- TOC entry 3636 (class 0 OID 0)
+-- Dependencies: 262
+-- Name: FUNCTION move_task_down(task_id bigint); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.move_task_down(task_id bigint) IS 'Switch the order of the task execution with a following task within the chain';
+
+
+--
+-- TOC entry 283 (class 1255 OID 16837)
+-- Name: move_task_up(bigint); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.move_task_up(task_id bigint) RETURNS boolean
+    LANGUAGE sql
+    AS $_$
+	WITH current_task (ct_chain_id, ct_id, ct_order) AS (
+		SELECT chain_id, task_id, task_order FROM timetable.task WHERE task_id = $1
+	),
+	tasks(t_id, t_new_order) AS (
+		SELECT task_id, COALESCE(LAG(task_order) OVER w, LEAD(task_order) OVER w)
+		FROM timetable.task t, current_task ct
+		WHERE chain_id = ct_chain_id AND (task_order < ct_order OR task_id = ct_id)
+		WINDOW w AS (PARTITION BY chain_id ORDER BY ABS(task_order - ct_order))
+		LIMIT 2
+	),
+	upd AS (
+		UPDATE timetable.task t SET task_order = t_new_order
+		FROM tasks WHERE tasks.t_id = t.task_id AND tasks.t_new_order IS NOT NULL
+		RETURNING true
+	)
+	SELECT COUNT(*) > 0 FROM upd
+$_$;
+
+
+ALTER FUNCTION timetable.move_task_up(task_id bigint) OWNER TO scheduler;
+
+--
+-- TOC entry 3637 (class 0 OID 0)
+-- Dependencies: 283
+-- Name: FUNCTION move_task_up(task_id bigint); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.move_task_up(task_id bigint) IS 'Switch the order of the task execution with a previous task within the chain';
+
+
+--
+-- TOC entry 260 (class 1255 OID 16735)
+-- Name: next_run(timetable.cron); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.next_run(cron timetable.cron) RETURNS timestamp with time zone
+    LANGUAGE sql STRICT
+    AS $$
+    SELECT * FROM timetable.cron_runs(now(), cron) LIMIT 1
+$$;
+
+
+ALTER FUNCTION timetable.next_run(cron timetable.cron) OWNER TO scheduler;
+
+--
+-- TOC entry 281 (class 1255 OID 16835)
+-- Name: notify_chain_start(bigint, text, interval); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.notify_chain_start(chain_id bigint, worker_name text, start_delay interval DEFAULT NULL::interval) RETURNS void
+    LANGUAGE sql
+    AS $$
+    SELECT pg_notify(
+        worker_name, 
+        format('{"ConfigID": %s, "Command": "START", "Ts": %s, "Delay": %s}', 
+            chain_id, 
+            EXTRACT(epoch FROM clock_timestamp())::bigint,
+            COALESCE(EXTRACT(epoch FROM start_delay)::bigint, 0)
+        )
+    )
+$$;
+
+
+ALTER FUNCTION timetable.notify_chain_start(chain_id bigint, worker_name text, start_delay interval) OWNER TO scheduler;
+
+--
+-- TOC entry 3638 (class 0 OID 0)
+-- Dependencies: 281
+-- Name: FUNCTION notify_chain_start(chain_id bigint, worker_name text, start_delay interval); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.notify_chain_start(chain_id bigint, worker_name text, start_delay interval) IS 'Send notification to the worker to start the chain';
+
+
+--
+-- TOC entry 282 (class 1255 OID 16836)
+-- Name: notify_chain_stop(bigint, text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.notify_chain_stop(chain_id bigint, worker_name text) RETURNS void
+    LANGUAGE sql
+    AS $$ 
+    SELECT pg_notify(
+        worker_name, 
+        format('{"ConfigID": %s, "Command": "STOP", "Ts": %s}', 
+            chain_id, 
+            EXTRACT(epoch FROM clock_timestamp())::bigint)
+        )
+$$;
+
+
+ALTER FUNCTION timetable.notify_chain_stop(chain_id bigint, worker_name text) OWNER TO scheduler;
+
+--
+-- TOC entry 3639 (class 0 OID 0)
+-- Dependencies: 282
+-- Name: FUNCTION notify_chain_stop(chain_id bigint, worker_name text); Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON FUNCTION timetable.notify_chain_stop(chain_id bigint, worker_name text) IS 'Send notification to the worker to stop the chain';
+
+
+--
+-- TOC entry 278 (class 1255 OID 16829)
+-- Name: try_lock_client_name(bigint, text); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.try_lock_client_name(worker_pid bigint, worker_name text) RETURNS boolean
+    LANGUAGE plpgsql STRICT
+    AS $$
+BEGIN
+    IF pg_is_in_recovery() THEN
+        RAISE NOTICE 'Cannot obtain lock on a replica. Please, use the primary node';
+        RETURN FALSE;
+    END IF;
+    -- remove disconnected sessions
+    DELETE
+        FROM timetable.active_session
+        WHERE server_pid NOT IN (
+            SELECT pid
+            FROM pg_catalog.pg_stat_activity
+            WHERE application_name = 'pg_timetable'
+        );
+    DELETE 
+        FROM timetable.active_chain 
+        WHERE client_name NOT IN (
+            SELECT client_name FROM timetable.active_session
+        );
+    -- check if there any active sessions with the client name but different client pid
+    PERFORM 1
+        FROM timetable.active_session s
+        WHERE
+            s.client_pid <> worker_pid
+            AND s.client_name = worker_name
+        LIMIT 1;
+    IF FOUND THEN
+        RAISE NOTICE 'Another client is already connected to server with name: %', worker_name;
+        RETURN FALSE;
+    END IF;
+    -- insert current session information
+    INSERT INTO timetable.active_session(client_pid, client_name, server_pid) VALUES (worker_pid, worker_name, pg_backend_pid());
+    RETURN TRUE;
+END;
+$$;
+
+
+ALTER FUNCTION timetable.try_lock_client_name(worker_pid bigint, worker_name text) OWNER TO scheduler;
+
+--
+-- TOC entry 255 (class 1255 OID 16831)
+-- Name: validate_json_schema(jsonb, jsonb, jsonb); Type: FUNCTION; Schema: timetable; Owner: scheduler
+--
+
+CREATE FUNCTION timetable.validate_json_schema(schema jsonb, data jsonb, root_schema jsonb DEFAULT NULL::jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE
+    AS $_$
+DECLARE
+  prop text;
+  item jsonb;
+  path text[];
+  types text[];
+  pattern text;
+  props text[];
+BEGIN
+
+  IF root_schema IS NULL THEN
+    root_schema = schema;
+  END IF;
+
+  IF schema ? 'type' THEN
+    IF jsonb_typeof(schema->'type') = 'array' THEN
+      types = ARRAY(SELECT jsonb_array_elements_text(schema->'type'));
+    ELSE
+      types = ARRAY[schema->>'type'];
+    END IF;
+    IF (SELECT NOT bool_or(timetable._validate_json_schema_type(type, data)) FROM unnest(types) type) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'properties' THEN
+    FOR prop IN SELECT jsonb_object_keys(schema->'properties') LOOP
+      IF data ? prop AND NOT timetable.validate_json_schema(schema->'properties'->prop, data->prop, root_schema) THEN
+        RETURN false;
+      END IF;
+    END LOOP;
+  END IF;
+
+  IF schema ? 'required' AND jsonb_typeof(data) = 'object' THEN
+    IF NOT ARRAY(SELECT jsonb_object_keys(data)) @>
+           ARRAY(SELECT jsonb_array_elements_text(schema->'required')) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'items' AND jsonb_typeof(data) = 'array' THEN
+    IF jsonb_typeof(schema->'items') = 'object' THEN
+      FOR item IN SELECT jsonb_array_elements(data) LOOP
+        IF NOT timetable.validate_json_schema(schema->'items', item, root_schema) THEN
+          RETURN false;
+        END IF;
+      END LOOP;
+    ELSE
+      IF NOT (
+        SELECT bool_and(i > jsonb_array_length(schema->'items') OR timetable.validate_json_schema(schema->'items'->(i::int - 1), elem, root_schema))
+        FROM jsonb_array_elements(data) WITH ORDINALITY AS t(elem, i)
+      ) THEN
+        RETURN false;
+      END IF;
+    END IF;
+  END IF;
+
+  IF jsonb_typeof(schema->'additionalItems') = 'boolean' and NOT (schema->'additionalItems')::text::boolean AND jsonb_typeof(schema->'items') = 'array' THEN
+    IF jsonb_array_length(data) > jsonb_array_length(schema->'items') THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF jsonb_typeof(schema->'additionalItems') = 'object' THEN
+    IF NOT (
+        SELECT bool_and(timetable.validate_json_schema(schema->'additionalItems', elem, root_schema))
+        FROM jsonb_array_elements(data) WITH ORDINALITY AS t(elem, i)
+        WHERE i > jsonb_array_length(schema->'items')
+      ) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'minimum' AND jsonb_typeof(data) = 'number' THEN
+    IF data::text::numeric < (schema->>'minimum')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'maximum' AND jsonb_typeof(data) = 'number' THEN
+    IF data::text::numeric > (schema->>'maximum')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF COALESCE((schema->'exclusiveMinimum')::text::bool, FALSE) THEN
+    IF data::text::numeric = (schema->>'minimum')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF COALESCE((schema->'exclusiveMaximum')::text::bool, FALSE) THEN
+    IF data::text::numeric = (schema->>'maximum')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'anyOf' THEN
+    IF NOT (SELECT bool_or(timetable.validate_json_schema(sub_schema, data, root_schema)) FROM jsonb_array_elements(schema->'anyOf') sub_schema) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'allOf' THEN
+    IF NOT (SELECT bool_and(timetable.validate_json_schema(sub_schema, data, root_schema)) FROM jsonb_array_elements(schema->'allOf') sub_schema) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'oneOf' THEN
+    IF 1 != (SELECT COUNT(*) FROM jsonb_array_elements(schema->'oneOf') sub_schema WHERE timetable.validate_json_schema(sub_schema, data, root_schema)) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF COALESCE((schema->'uniqueItems')::text::boolean, false) THEN
+    IF (SELECT COUNT(*) FROM jsonb_array_elements(data)) != (SELECT count(DISTINCT val) FROM jsonb_array_elements(data) val) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'additionalProperties' AND jsonb_typeof(data) = 'object' THEN
+    props := ARRAY(
+      SELECT key
+      FROM jsonb_object_keys(data) key
+      WHERE key NOT IN (SELECT jsonb_object_keys(schema->'properties'))
+        AND NOT EXISTS (SELECT * FROM jsonb_object_keys(schema->'patternProperties') pat WHERE key ~ pat)
+    );
+    IF jsonb_typeof(schema->'additionalProperties') = 'boolean' THEN
+      IF NOT (schema->'additionalProperties')::text::boolean AND jsonb_typeof(data) = 'object' AND NOT props <@ ARRAY(SELECT jsonb_object_keys(schema->'properties')) THEN
+        RETURN false;
+      END IF;
+    ELSEIF NOT (
+      SELECT bool_and(timetable.validate_json_schema(schema->'additionalProperties', data->key, root_schema))
+      FROM unnest(props) key
+    ) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? '$ref' THEN
+    path := ARRAY(
+      SELECT regexp_replace(regexp_replace(path_part, '~1', '/'), '~0', '~')
+      FROM UNNEST(regexp_split_to_array(schema->>'$ref', '/')) path_part
+    );
+    -- ASSERT path[1] = '#', 'only refs anchored at the root are supported';
+    IF NOT timetable.validate_json_schema(root_schema #> path[2:array_length(path, 1)], data, root_schema) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'enum' THEN
+    IF NOT EXISTS (SELECT * FROM jsonb_array_elements(schema->'enum') val WHERE val = data) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'minLength' AND jsonb_typeof(data) = 'string' THEN
+    IF char_length(data #>> '{}') < (schema->>'minLength')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'maxLength' AND jsonb_typeof(data) = 'string' THEN
+    IF char_length(data #>> '{}') > (schema->>'maxLength')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'not' THEN
+    IF timetable.validate_json_schema(schema->'not', data, root_schema) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'maxProperties' AND jsonb_typeof(data) = 'object' THEN
+    IF (SELECT count(*) FROM jsonb_object_keys(data)) > (schema->>'maxProperties')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'minProperties' AND jsonb_typeof(data) = 'object' THEN
+    IF (SELECT count(*) FROM jsonb_object_keys(data)) < (schema->>'minProperties')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'maxItems' AND jsonb_typeof(data) = 'array' THEN
+    IF (SELECT count(*) FROM jsonb_array_elements(data)) > (schema->>'maxItems')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'minItems' AND jsonb_typeof(data) = 'array' THEN
+    IF (SELECT count(*) FROM jsonb_array_elements(data)) < (schema->>'minItems')::numeric THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'dependencies' THEN
+    FOR prop IN SELECT jsonb_object_keys(schema->'dependencies') LOOP
+      IF data ? prop THEN
+        IF jsonb_typeof(schema->'dependencies'->prop) = 'array' THEN
+          IF NOT (SELECT bool_and(data ? dep) FROM jsonb_array_elements_text(schema->'dependencies'->prop) dep) THEN
+            RETURN false;
+          END IF;
+        ELSE
+          IF NOT timetable.validate_json_schema(schema->'dependencies'->prop, data, root_schema) THEN
+            RETURN false;
+          END IF;
+        END IF;
+      END IF;
+    END LOOP;
+  END IF;
+
+  IF schema ? 'pattern' AND jsonb_typeof(data) = 'string' THEN
+    IF (data #>> '{}') !~ (schema->>'pattern') THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF schema ? 'patternProperties' AND jsonb_typeof(data) = 'object' THEN
+    FOR prop IN SELECT jsonb_object_keys(data) LOOP
+      FOR pattern IN SELECT jsonb_object_keys(schema->'patternProperties') LOOP
+        RAISE NOTICE 'prop %s, pattern %, schema %', prop, pattern, schema->'patternProperties'->pattern;
+        IF prop ~ pattern AND NOT timetable.validate_json_schema(schema->'patternProperties'->pattern, data->prop, root_schema) THEN
+          RETURN false;
+        END IF;
+      END LOOP;
+    END LOOP;
+  END IF;
+
+  IF schema ? 'multipleOf' AND jsonb_typeof(data) = 'number' THEN
+    IF data::text::numeric % (schema->>'multipleOf')::numeric != 0 THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  RETURN true;
+END;
+$_$;
+
+
+ALTER FUNCTION timetable.validate_json_schema(schema jsonb, data jsonb, root_schema jsonb) OWNER TO scheduler;
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- TOC entry 237 (class 1259 OID 16641)
+-- Name: __EFMigrationsHistory; Type: TABLE; Schema: public; Owner: appuser
+--
+
+CREATE TABLE public."__EFMigrationsHistory" (
+    "MigrationId" character varying(150) NOT NULL,
+    "ProductVersion" character varying(32) NOT NULL
+);
+
+
+ALTER TABLE public."__EFMigrationsHistory" OWNER TO appuser;
+
+--
+-- TOC entry 229 (class 1259 OID 16548)
+-- Name: comment; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.comment (
+    id integer NOT NULL,
+    content text NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    user_id integer,
+    task_id integer
+);
+
+
+ALTER TABLE public.comment OWNER TO postgres;
+
+--
+-- TOC entry 228 (class 1259 OID 16547)
+-- Name: comment_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.comment_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.comment_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3640 (class 0 OID 0)
+-- Dependencies: 228
+-- Name: comment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.comment_id_seq OWNED BY public.comment.id;
+
+
+--
+-- TOC entry 219 (class 1259 OID 16403)
+-- Name: contacts; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.contacts (
+    id integer NOT NULL,
+    name character varying(100) NOT NULL,
+    email character varying(150),
+    gender character varying(10),
+    occupation character varying(100),
+    phone character varying(20),
+    dob date,
+    notes text,
+    user_id integer
+);
+
+
+ALTER TABLE public.contacts OWNER TO postgres;
+
+--
+-- TOC entry 218 (class 1259 OID 16402)
+-- Name: contacts_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.contacts_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.contacts_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3641 (class 0 OID 0)
+-- Dependencies: 218
+-- Name: contacts_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.contacts_id_seq OWNED BY public.contacts.id;
+
+
+--
+-- TOC entry 249 (class 1259 OID 25055)
+-- Name: logs; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.logs (
+    id integer NOT NULL,
+    user_id integer,
+    description text,
+    "timestamp" timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.logs OWNER TO postgres;
+
+--
+-- TOC entry 248 (class 1259 OID 25054)
+-- Name: logs_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.logs_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.logs_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3642 (class 0 OID 0)
+-- Dependencies: 248
+-- Name: logs_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.logs_id_seq OWNED BY public.logs.id;
+
+
+--
+-- TOC entry 231 (class 1259 OID 16568)
+-- Name: person_task_list; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.person_task_list (
+    id integer NOT NULL,
+    user_id integer,
+    task_id integer
+);
+
+
+ALTER TABLE public.person_task_list OWNER TO postgres;
+
+--
+-- TOC entry 230 (class 1259 OID 16567)
+-- Name: person_task_list_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.person_task_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.person_task_list_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3643 (class 0 OID 0)
+-- Dependencies: 230
+-- Name: person_task_list_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.person_task_list_id_seq OWNED BY public.person_task_list.id;
+
+
+--
+-- TOC entry 225 (class 1259 OID 16473)
+-- Name: priority; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.priority (
+    id integer NOT NULL,
+    title character varying(50) NOT NULL,
+    description text
+);
+
+
+ALTER TABLE public.priority OWNER TO postgres;
+
+--
+-- TOC entry 224 (class 1259 OID 16472)
+-- Name: priority_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.priority_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.priority_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3644 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: priority_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.priority_id_seq OWNED BY public.priority.id;
+
+
+--
+-- TOC entry 221 (class 1259 OID 16441)
+-- Name: project; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.project (
+    id integer NOT NULL,
+    name character varying(200) NOT NULL,
+    description text,
+    start_date date,
+    end_date date,
+    status character varying(50) DEFAULT 'active'::character varying,
+    CONSTRAINT status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying, 'done'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.project OWNER TO postgres;
+
+--
+-- TOC entry 235 (class 1259 OID 16603)
+-- Name: project_assignment; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.project_assignment (
+    id integer NOT NULL,
+    task_id integer,
+    project_id integer,
+    user_id integer,
+    assigned_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.project_assignment OWNER TO postgres;
+
+--
+-- TOC entry 234 (class 1259 OID 16602)
+-- Name: project_assignment_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.project_assignment_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.project_assignment_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3645 (class 0 OID 0)
+-- Dependencies: 234
+-- Name: project_assignment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.project_assignment_id_seq OWNED BY public.project_assignment.id;
+
+
+--
+-- TOC entry 220 (class 1259 OID 16440)
+-- Name: project_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.project_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.project_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3646 (class 0 OID 0)
+-- Dependencies: 220
+-- Name: project_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.project_id_seq OWNED BY public.project.id;
+
+
+--
+-- TOC entry 233 (class 1259 OID 16585)
+-- Name: project_member; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.project_member (
+    id integer NOT NULL,
+    user_id integer,
+    project_id integer,
+    role character varying(100) NOT NULL,
+    participated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.project_member OWNER TO postgres;
+
+--
+-- TOC entry 232 (class 1259 OID 16584)
+-- Name: project_member_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.project_member_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.project_member_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3647 (class 0 OID 0)
+-- Dependencies: 232
+-- Name: project_member_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.project_member_id_seq OWNED BY public.project_member.id;
+
+
+--
+-- TOC entry 223 (class 1259 OID 16464)
+-- Name: tag; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.tag (
+    id integer NOT NULL,
+    tag_name character varying(100) NOT NULL
+);
+
+
+ALTER TABLE public.tag OWNER TO postgres;
+
+--
+-- TOC entry 222 (class 1259 OID 16463)
+-- Name: tag_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.tag_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.tag_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3648 (class 0 OID 0)
+-- Dependencies: 222
+-- Name: tag_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.tag_id_seq OWNED BY public.tag.id;
+
+
+--
+-- TOC entry 227 (class 1259 OID 16531)
+-- Name: task; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.task (
+    id integer NOT NULL,
+    title character varying(200) NOT NULL,
+    description text,
+    status character varying(50) DEFAULT 'pending'::character varying,
+    due_date date,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    priority_id integer,
+    CONSTRAINT status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'completed'::character varying, 'overdue'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.task OWNER TO postgres;
+
+--
+-- TOC entry 226 (class 1259 OID 16530)
+-- Name: task_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.task_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.task_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3650 (class 0 OID 0)
+-- Dependencies: 226
+-- Name: task_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.task_id_seq OWNED BY public.task.id;
+
+
+--
+-- TOC entry 236 (class 1259 OID 16625)
+-- Name: task_tag_link; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.task_tag_link (
+    task_id integer NOT NULL,
+    tag_id integer NOT NULL
+);
+
+
+ALTER TABLE public.task_tag_link OWNER TO postgres;
+
+--
+-- TOC entry 217 (class 1259 OID 16390)
+-- Name: users; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.users (
+    id integer NOT NULL,
+    name character varying(100) NOT NULL,
+    email character varying(150) NOT NULL,
+    password character varying(255) NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.users OWNER TO postgres;
+
+--
+-- TOC entry 216 (class 1259 OID 16389)
+-- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.users_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.users_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 3651 (class 0 OID 0)
+-- Dependencies: 216
+-- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+
+
+--
+-- TOC entry 247 (class 1259 OID 16823)
+-- Name: active_chain; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE UNLOGGED TABLE timetable.active_chain (
+    chain_id bigint NOT NULL,
+    client_name text NOT NULL,
+    started_at timestamp with time zone DEFAULT now()
+);
+
+
+ALTER TABLE timetable.active_chain OWNER TO scheduler;
+
+--
+-- TOC entry 3652 (class 0 OID 0)
+-- Dependencies: 247
+-- Name: TABLE active_chain; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.active_chain IS 'Stores information about active chains within session';
+
+
+--
+-- TOC entry 244 (class 1259 OID 16790)
+-- Name: active_session; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE UNLOGGED TABLE timetable.active_session (
+    client_pid bigint NOT NULL,
+    server_pid bigint NOT NULL,
+    client_name text NOT NULL,
+    started_at timestamp with time zone DEFAULT now()
+);
+
+
+ALTER TABLE timetable.active_session OWNER TO scheduler;
+
+--
+-- TOC entry 3653 (class 0 OID 0)
+-- Dependencies: 244
+-- Name: TABLE active_session; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.active_session IS 'Stores information about active sessions';
+
+
+--
+-- TOC entry 240 (class 1259 OID 16737)
+-- Name: chain; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.chain (
+    chain_id bigint NOT NULL,
+    chain_name text NOT NULL,
+    run_at timetable.cron,
+    max_instances integer,
+    timeout integer DEFAULT 0,
+    live boolean DEFAULT false,
+    self_destruct boolean DEFAULT false,
+    exclusive_execution boolean DEFAULT false,
+    client_name text,
+    on_error text
+);
+
+
+ALTER TABLE timetable.chain OWNER TO scheduler;
+
+--
+-- TOC entry 3654 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: TABLE chain; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.chain IS 'Stores information about chains schedule';
+
+
+--
+-- TOC entry 3655 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.run_at; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.run_at IS 'Extended CRON-style time notation the chain has to be run at';
+
+
+--
+-- TOC entry 3656 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.max_instances; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.max_instances IS 'Number of instances (clients) this chain can run in parallel';
+
+
+--
+-- TOC entry 3657 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.timeout; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.timeout IS 'Abort any chain that takes more than the specified number of milliseconds';
+
+
+--
+-- TOC entry 3658 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.live; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.live IS 'Indication that the chain is ready to run, set to FALSE to pause execution';
+
+
+--
+-- TOC entry 3659 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.self_destruct; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.self_destruct IS 'Indication that this chain will delete itself after successful run';
+
+
+--
+-- TOC entry 3660 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.exclusive_execution; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.exclusive_execution IS 'All parallel chains should be paused while executing this chain';
+
+
+--
+-- TOC entry 3661 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: COLUMN chain.client_name; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.chain.client_name IS 'Only client with this name is allowed to run this chain, set to NULL to allow any client';
+
+
+--
+-- TOC entry 239 (class 1259 OID 16736)
+-- Name: chain_chain_id_seq; Type: SEQUENCE; Schema: timetable; Owner: scheduler
+--
+
+CREATE SEQUENCE timetable.chain_chain_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE timetable.chain_chain_id_seq OWNER TO scheduler;
+
+--
+-- TOC entry 3662 (class 0 OID 0)
+-- Dependencies: 239
+-- Name: chain_chain_id_seq; Type: SEQUENCE OWNED BY; Schema: timetable; Owner: scheduler
+--
+
+ALTER SEQUENCE timetable.chain_chain_id_seq OWNED BY timetable.chain.chain_id;
+
+
+--
+-- TOC entry 246 (class 1259 OID 16817)
+-- Name: execution_log; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.execution_log (
+    chain_id bigint,
+    task_id bigint,
+    txid bigint NOT NULL,
+    last_run timestamp with time zone DEFAULT now(),
+    finished timestamp with time zone,
+    pid bigint,
+    returncode integer,
+    ignore_error boolean,
+    kind timetable.command_kind,
+    command text,
+    output text,
+    client_name text NOT NULL
+);
+
+
+ALTER TABLE timetable.execution_log OWNER TO scheduler;
+
+--
+-- TOC entry 3663 (class 0 OID 0)
+-- Dependencies: 246
+-- Name: TABLE execution_log; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.execution_log IS 'Stores log entries of executed tasks and chains';
+
+
+--
+-- TOC entry 245 (class 1259 OID 16810)
+-- Name: log; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.log (
+    ts timestamp with time zone DEFAULT now(),
+    pid integer NOT NULL,
+    log_level timetable.log_type NOT NULL,
+    client_name text DEFAULT timetable.get_client_name(pg_backend_pid()),
+    message text,
+    message_data jsonb
+);
+
+
+ALTER TABLE timetable.log OWNER TO scheduler;
+
+--
+-- TOC entry 3664 (class 0 OID 0)
+-- Dependencies: 245
+-- Name: TABLE log; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.log IS 'Stores log entries of active sessions';
+
+
+--
+-- TOC entry 238 (class 1259 OID 16719)
+-- Name: migration; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.migration (
+    id bigint NOT NULL,
+    version text NOT NULL
+);
+
+
+ALTER TABLE timetable.migration OWNER TO scheduler;
+
+--
+-- TOC entry 243 (class 1259 OID 16777)
+-- Name: parameter; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.parameter (
+    task_id bigint NOT NULL,
+    order_id integer NOT NULL,
+    value jsonb,
+    CONSTRAINT parameter_order_id_check CHECK ((order_id > 0))
+);
+
+
+ALTER TABLE timetable.parameter OWNER TO scheduler;
+
+--
+-- TOC entry 3665 (class 0 OID 0)
+-- Dependencies: 243
+-- Name: TABLE parameter; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.parameter IS 'Stores parameters passed as arguments to a chain task';
+
+
+--
+-- TOC entry 242 (class 1259 OID 16760)
+-- Name: task; Type: TABLE; Schema: timetable; Owner: scheduler
+--
+
+CREATE TABLE timetable.task (
+    task_id bigint NOT NULL,
+    chain_id bigint,
+    task_order double precision NOT NULL,
+    task_name text,
+    kind timetable.command_kind DEFAULT 'SQL'::timetable.command_kind NOT NULL,
+    command text NOT NULL,
+    run_as text,
+    database_connection text,
+    ignore_error boolean DEFAULT false NOT NULL,
+    autonomous boolean DEFAULT false NOT NULL,
+    timeout integer DEFAULT 0
+);
+
+
+ALTER TABLE timetable.task OWNER TO scheduler;
+
+--
+-- TOC entry 3666 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: TABLE task; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON TABLE timetable.task IS 'Holds information about chain elements aka tasks';
+
+
+--
+-- TOC entry 3667 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.chain_id; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.chain_id IS 'Link to the chain, if NULL task considered to be disabled';
+
+
+--
+-- TOC entry 3668 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.task_order; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.task_order IS 'Indicates the order of task within a chain';
+
+
+--
+-- TOC entry 3669 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.kind; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.kind IS 'Indicates whether "command" is SQL, built-in function or an external program';
+
+
+--
+-- TOC entry 3670 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.command; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.command IS 'Contains either an SQL command, or command string to be executed';
+
+
+--
+-- TOC entry 3671 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.run_as; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.run_as IS 'Role name to run task as. Uses SET ROLE for SQL commands';
+
+
+--
+-- TOC entry 3672 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.ignore_error; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.ignore_error IS 'Indicates whether a next task in a chain can be executed regardless of the success of the current one';
+
+
+--
+-- TOC entry 3673 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.autonomous; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.autonomous IS 'Specify if the task should be executed out of the chain transaction. Useful for VACUUM, CREATE DATABASE, CALL etc.';
+
+
+--
+-- TOC entry 3674 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: COLUMN task.timeout; Type: COMMENT; Schema: timetable; Owner: scheduler
+--
+
+COMMENT ON COLUMN timetable.task.timeout IS 'Abort any task within a chain that takes more than the specified number of milliseconds';
+
+
+--
+-- TOC entry 241 (class 1259 OID 16759)
+-- Name: task_task_id_seq; Type: SEQUENCE; Schema: timetable; Owner: scheduler
+--
+
+CREATE SEQUENCE timetable.task_task_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE timetable.task_task_id_seq OWNER TO scheduler;
+
+--
+-- TOC entry 3675 (class 0 OID 0)
+-- Dependencies: 241
+-- Name: task_task_id_seq; Type: SEQUENCE OWNED BY; Schema: timetable; Owner: scheduler
+--
+
+ALTER SEQUENCE timetable.task_task_id_seq OWNED BY timetable.task.task_id;
+
+
+--
+-- TOC entry 3359 (class 2604 OID 16551)
+-- Name: comment id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.comment ALTER COLUMN id SET DEFAULT nextval('public.comment_id_seq'::regclass);
+
+
+--
+-- TOC entry 3350 (class 2604 OID 16406)
+-- Name: contacts id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.contacts ALTER COLUMN id SET DEFAULT nextval('public.contacts_id_seq'::regclass);
+
+
+--
+-- TOC entry 3381 (class 2604 OID 25058)
+-- Name: logs id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs ALTER COLUMN id SET DEFAULT nextval('public.logs_id_seq'::regclass);
+
+
+--
+-- TOC entry 3361 (class 2604 OID 16571)
+-- Name: person_task_list id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.person_task_list ALTER COLUMN id SET DEFAULT nextval('public.person_task_list_id_seq'::regclass);
+
+
+--
+-- TOC entry 3354 (class 2604 OID 16476)
+-- Name: priority id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.priority ALTER COLUMN id SET DEFAULT nextval('public.priority_id_seq'::regclass);
+
+
+--
+-- TOC entry 3351 (class 2604 OID 16444)
+-- Name: project id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project ALTER COLUMN id SET DEFAULT nextval('public.project_id_seq'::regclass);
+
+
+--
+-- TOC entry 3364 (class 2604 OID 16606)
+-- Name: project_assignment id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_assignment ALTER COLUMN id SET DEFAULT nextval('public.project_assignment_id_seq'::regclass);
+
+
+--
+-- TOC entry 3362 (class 2604 OID 16588)
+-- Name: project_member id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_member ALTER COLUMN id SET DEFAULT nextval('public.project_member_id_seq'::regclass);
+
+
+--
+-- TOC entry 3353 (class 2604 OID 16467)
+-- Name: tag id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.tag ALTER COLUMN id SET DEFAULT nextval('public.tag_id_seq'::regclass);
+
+
+--
+-- TOC entry 3355 (class 2604 OID 16534)
+-- Name: task id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task ALTER COLUMN id SET DEFAULT nextval('public.task_id_seq'::regclass);
+
+
+--
+-- TOC entry 3347 (class 2604 OID 16393)
+-- Name: users id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- TOC entry 3366 (class 2604 OID 16740)
+-- Name: chain chain_id; Type: DEFAULT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.chain ALTER COLUMN chain_id SET DEFAULT nextval('timetable.chain_chain_id_seq'::regclass);
+
+
+--
+-- TOC entry 3371 (class 2604 OID 16763)
+-- Name: task task_id; Type: DEFAULT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.task ALTER COLUMN task_id SET DEFAULT nextval('timetable.task_task_id_seq'::regclass);
+
+
+--
+-- TOC entry 3610 (class 0 OID 16641)
+-- Dependencies: 237
+-- Data for Name: __EFMigrationsHistory; Type: TABLE DATA; Schema: public; Owner: appuser
+--
+
+INSERT INTO public."__EFMigrationsHistory" VALUES ('20241211170607_InitialCreate', '9.0.0');
+INSERT INTO public."__EFMigrationsHistory" VALUES ('20241219092756_NewUpdate', '9.0.0');
+INSERT INTO public."__EFMigrationsHistory" VALUES ('20241220135644_SomeChange', '9.0.0');
+
+
+--
+-- TOC entry 3602 (class 0 OID 16548)
+-- Dependencies: 229
+-- Data for Name: comment; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.comment VALUES (1, '123', '2025-01-03 17:29:09.37741+07', 8, 45);
+INSERT INTO public.comment VALUES (2, '123', '2025-01-03 17:38:38.844426+07', 8, 45);
+INSERT INTO public.comment VALUES (3, '123', '2025-01-03 17:40:18.738058+07', 8, 45);
+INSERT INTO public.comment VALUES (4, 'TEST', '2025-01-03 17:44:36.157701+07', 8, 45);
+INSERT INTO public.comment VALUES (5, 'test', '2025-01-03 17:55:00.901239+07', 8, 45);
+INSERT INTO public.comment VALUES (6, 'test', '2025-01-03 17:59:51.489041+07', 8, 45);
+
+
+--
+-- TOC entry 3592 (class 0 OID 16403)
+-- Dependencies: 219
+-- Data for Name: contacts; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.contacts VALUES (1, 'Nguyen Trung Kien', 'husta@gmail.com', NULL, NULL, NULL, '-infinity', NULL, 3);
+INSERT INTO public.contacts VALUES (2, 'Kien', 'hust3@edu.vn', 'Male', 'IT', '123123', '2000-11-11', '123', 7);
+INSERT INTO public.contacts VALUES (4, 'Person1', '1@gmail.com', 'Male', 'IT', '123123', '2000-11-11', 'IT', 9);
+INSERT INTO public.contacts VALUES (5, 'Nguyen Trung Kien', '123@gmail.com', 'Male', 'IT', '123123', '20000-11-11', 'IT', 10);
+INSERT INTO public.contacts VALUES (6, 'NTK', '4@gmail.com', 'Male', 'IT', '123123', '2000-01-01', 'IT', 13);
+INSERT INTO public.contacts VALUES (7, 'Nguyen Trung Kien', '13@gmail.com', 'Male', 'IT', '123123', '2000-11-11', 'IT', 14);
+INSERT INTO public.contacts VALUES (8, 'Nguyen Trung Kien', 'K1@gmail.com', 'Female', 'IT', '123123', '2000-01-01', 'IT', 15);
+INSERT INTO public.contacts VALUES (9, 'Nguyen Trung Kien', '12312@gmail.com', 'Male', 'IT', '123123', '2000-11-11', 'IT', 16);
+INSERT INTO public.contacts VALUES (3, 'Admin', 'admin@hust.edu.vn', 'Male', 'Admin', '123', '2000-11-11', 'Admin123123', 8);
+INSERT INTO public.contacts VALUES (10, 'Munwind', 'lehaunoob@gmail.com', 'Female', 'Bo lehau', 'kdsjf', '2002-10-12', '', 17);
+INSERT INTO public.contacts VALUES (11, 'Pham Duy Hoang', 'munwind@gmail.com', 'Male', 'IT', '123123', '0200-11-11', '12312312312', 18);
+INSERT INTO public.contacts VALUES (12, 'Nguyen Trung Kien', 'lehau123@gmail.com', 'Male', 'IT', '123123', '2000-11-11', 'IT', 19);
+INSERT INTO public.contacts VALUES (13, 'Nguyen Trung Kien', 'kn14075@gmail.com', 'Male', 'IT', '123123', '2004-11-04', 'IT', 20);
+INSERT INTO public.contacts VALUES (14, 'Nguyen Trung Kien', 'trungkien11042004@gmail.com', 'Male', 'IT', '123123', '2004-11-11', 'IT', 21);
+
+
+--
+-- TOC entry 3622 (class 0 OID 25055)
+-- Dependencies: 249
+-- Data for Name: logs; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.logs VALUES (1, 8, 'Sign in', '2025-01-04 03:02:31.684522+07');
+INSERT INTO public.logs VALUES (2, 18, 'Sign in', '2025-01-04 03:17:20.540637+07');
+INSERT INTO public.logs VALUES (3, 18, 'Your password was changed', '2025-01-04 03:18:03.889165+07');
+INSERT INTO public.logs VALUES (4, 18, 'Sign in', '2025-01-04 03:18:16.685214+07');
+INSERT INTO public.logs VALUES (5, 18, 'Create a new task', '2025-01-04 03:20:42.247885+07');
+INSERT INTO public.logs VALUES (6, 18, 'Updated your profile', '2025-01-04 03:21:46.734371+07');
+INSERT INTO public.logs VALUES (7, 18, 'Successfully add a new project', '2025-01-04 03:23:28.192147+07');
+INSERT INTO public.logs VALUES (8, 19, 'Created your profile', '2025-01-04 03:24:31.55047+07');
+INSERT INTO public.logs VALUES (9, 19, 'Sign in', '2025-01-04 03:24:39.402223+07');
+INSERT INTO public.logs VALUES (10, 19, 'Create a new task', '2025-01-04 03:25:43.023181+07');
+INSERT INTO public.logs VALUES (11, 19, 'Removed a task', '2025-01-04 03:26:41.567049+07');
+INSERT INTO public.logs VALUES (12, 19, 'Successfully add a new project', '2025-01-04 03:27:32.933617+07');
+INSERT INTO public.logs VALUES (13, 19, 'Deleted a project', '2025-01-04 03:27:37.904164+07');
+INSERT INTO public.logs VALUES (14, 8, 'Sign in', '2025-02-15 06:23:45.206393+07');
+INSERT INTO public.logs VALUES (15, 8, 'Updated your profile', '2025-02-15 06:24:22.612514+07');
+INSERT INTO public.logs VALUES (16, 8, 'Sign in', '2025-02-15 06:30:13.626979+07');
+INSERT INTO public.logs VALUES (17, 8, 'Sign in', '2025-02-15 07:25:47.426194+07');
+INSERT INTO public.logs VALUES (18, 20, 'Created your profile', '2025-02-15 08:04:40.828366+07');
+INSERT INTO public.logs VALUES (19, 21, 'Created your profile', '2025-02-15 08:12:04.010464+07');
+INSERT INTO public.logs VALUES (20, 21, 'Sign in', '2025-02-15 08:12:25.8123+07');
+
+
+--
+-- TOC entry 3604 (class 0 OID 16568)
+-- Dependencies: 231
+-- Data for Name: person_task_list; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.person_task_list VALUES (1, 8, 13);
+INSERT INTO public.person_task_list VALUES (10, 8, 22);
+INSERT INTO public.person_task_list VALUES (12, 8, 24);
+INSERT INTO public.person_task_list VALUES (14, 8, 26);
+INSERT INTO public.person_task_list VALUES (15, 8, 27);
+INSERT INTO public.person_task_list VALUES (16, 8, 28);
+INSERT INTO public.person_task_list VALUES (17, 8, 29);
+INSERT INTO public.person_task_list VALUES (18, 8, 30);
+INSERT INTO public.person_task_list VALUES (19, 8, 31);
+INSERT INTO public.person_task_list VALUES (21, 8, 33);
+INSERT INTO public.person_task_list VALUES (22, 8, 34);
+INSERT INTO public.person_task_list VALUES (23, 8, 35);
+INSERT INTO public.person_task_list VALUES (24, 8, 36);
+INSERT INTO public.person_task_list VALUES (25, 8, 37);
+INSERT INTO public.person_task_list VALUES (26, 18, 46);
+
+
+--
+-- TOC entry 3598 (class 0 OID 16473)
+-- Dependencies: 225
+-- Data for Name: priority; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.priority VALUES (1, 'Low', 'Tasks with minimal impact or urgency.');
+INSERT INTO public.priority VALUES (2, 'Medium', 'Tasks with moderate urgency or impact.');
+INSERT INTO public.priority VALUES (3, 'High', 'Tasks requiring immediate attention.');
+INSERT INTO public.priority VALUES (4, 'Critical', 'Tasks with the highest urgency, often blocking other work.');
+INSERT INTO public.priority VALUES (5, 'Optional', 'Tasks that are not mandatory but good to complete.');
+
+
+--
+-- TOC entry 3594 (class 0 OID 16441)
+-- Dependencies: 221
+-- Data for Name: project; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.project VALUES (8, 'Vue Front-End Developer', '123', '2025-11-11', '2025-11-25', 'inactive');
+INSERT INTO public.project VALUES (11, 'Front-End Engineer (Vue)', '123', '2025-11-11', '2025-11-25', 'active');
+INSERT INTO public.project VALUES (6, '123123', '123123123123', '2025-11-11', '2025-11-25', 'active');
+INSERT INTO public.project VALUES (12, 'ganh lehau hom nay', 'lehau noob', '2025-02-01', '2025-01-01', 'active');
+INSERT INTO public.project VALUES (13, 'ganh lehau hom nay', 'lehau noob', '2025-02-01', '2025-03-01', 'active');
+INSERT INTO public.project VALUES (14, 'ganh lehau hom nay', 'lehau noob', '2025-02-01', '2025-03-01', 'active');
+INSERT INTO public.project VALUES (15, '123', '123', '2024-01-01', '2025-11-11', 'active');
+INSERT INTO public.project VALUES (16, '123', '123', '2025-11-11', '2025-12-12', 'active');
+INSERT INTO public.project VALUES (17, '123', '123', '2025-11-11', '2025-12-12', 'active');
+INSERT INTO public.project VALUES (18, '12312312321', '123', '2025-11-11', '2025-12-12', 'active');
+INSERT INTO public.project VALUES (19, '123', '123', '2025-11-11', '2025-12-12', 'active');
+INSERT INTO public.project VALUES (7, 'Vue Front-End Developer', '123', '2025-11-11', '2025-11-25', 'active');
+INSERT INTO public.project VALUES (20, 'my project', 'semester 2024.1', '2025-11-11', '2025-11-12', 'active');
+INSERT INTO public.project VALUES (21, 'test', 'test', '2025-11-11', '2025-12-12', 'active');
+
+
+--
+-- TOC entry 3608 (class 0 OID 16603)
+-- Dependencies: 235
+-- Data for Name: project_assignment; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.project_assignment VALUES (2, 44, 7, 17, '2025-01-03 00:53:52.264182+07');
+INSERT INTO public.project_assignment VALUES (3, 45, 7, 17, '2025-01-03 16:46:16.212162+07');
+
+
+--
+-- TOC entry 3606 (class 0 OID 16585)
+-- Dependencies: 233
+-- Data for Name: project_member; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.project_member VALUES (1, 8, 6, 'Leader', '-infinity');
+INSERT INTO public.project_member VALUES (2, 7, 6, 'Member', '-infinity');
+INSERT INTO public.project_member VALUES (3, 8, 7, 'Leader', '2024-12-31 05:27:15.425505+07');
+INSERT INTO public.project_member VALUES (4, 1, 7, 'Member', '2024-12-31 05:27:15.444542+07');
+INSERT INTO public.project_member VALUES (5, 4, 7, 'Member', '2024-12-31 05:27:15.444542+07');
+INSERT INTO public.project_member VALUES (6, 8, 8, 'Leader', '2024-12-31 05:27:45.671717+07');
+INSERT INTO public.project_member VALUES (7, 7, 8, 'Member', '2024-12-31 05:27:45.67955+07');
+INSERT INTO public.project_member VALUES (8, 5, 8, 'Member', '2024-12-31 05:27:45.67955+07');
+INSERT INTO public.project_member VALUES (15, 8, 11, 'Leader', '2025-01-01 06:55:06.046293+07');
+INSERT INTO public.project_member VALUES (16, 10, 11, 'Member', '2025-01-01 06:55:06.073256+07');
+INSERT INTO public.project_member VALUES (18, 17, 12, 'Leader', '2025-01-02 19:33:49.815751+07');
+INSERT INTO public.project_member VALUES (19, 5, 12, 'Member', '2025-01-02 19:33:49.848211+07');
+INSERT INTO public.project_member VALUES (20, 3, 12, 'Member', '2025-01-02 19:33:49.860019+07');
+INSERT INTO public.project_member VALUES (22, 16, 12, 'Member', '2025-01-02 19:33:49.848107+07');
+INSERT INTO public.project_member VALUES (21, 14, 12, 'Member', '2025-01-02 19:33:49.845485+07');
+INSERT INTO public.project_member VALUES (23, 4, 12, 'Member', '2025-01-02 19:33:49.848747+07');
+INSERT INTO public.project_member VALUES (24, 15, 12, 'Member', '2025-01-02 19:33:49.847009+07');
+INSERT INTO public.project_member VALUES (25, 2, 12, 'Member', '2025-01-02 19:33:49.869577+07');
+INSERT INTO public.project_member VALUES (26, 6, 12, 'Member', '2025-01-02 19:33:49.848648+07');
+INSERT INTO public.project_member VALUES (27, 10, 12, 'Member', '2025-01-02 19:33:49.884204+07');
+INSERT INTO public.project_member VALUES (28, 17, 13, 'Leader', '2025-01-02 19:34:04.594787+07');
+INSERT INTO public.project_member VALUES (29, 5, 13, 'Member', '2025-01-02 19:34:04.610016+07');
+INSERT INTO public.project_member VALUES (31, 16, 13, 'Member', '2025-01-02 19:34:04.609989+07');
+INSERT INTO public.project_member VALUES (32, 6, 13, 'Member', '2025-01-02 19:34:04.60999+07');
+INSERT INTO public.project_member VALUES (30, 14, 13, 'Member', '2025-01-02 19:34:04.610001+07');
+INSERT INTO public.project_member VALUES (33, 15, 13, 'Member', '2025-01-02 19:34:04.609989+07');
+INSERT INTO public.project_member VALUES (34, 4, 13, 'Member', '2025-01-02 19:34:04.610129+07');
+INSERT INTO public.project_member VALUES (36, 3, 13, 'Member', '2025-01-02 19:34:04.624668+07');
+INSERT INTO public.project_member VALUES (35, 2, 13, 'Member', '2025-01-02 19:34:04.624668+07');
+INSERT INTO public.project_member VALUES (37, 10, 13, 'Member', '2025-01-02 19:34:04.624668+07');
+INSERT INTO public.project_member VALUES (38, 17, 14, 'Leader', '2025-01-02 19:35:01.62242+07');
+INSERT INTO public.project_member VALUES (42, 6, 14, 'Member', '2025-01-02 19:35:01.633703+07');
+INSERT INTO public.project_member VALUES (39, 14, 14, 'Member', '2025-01-02 19:35:01.632962+07');
+INSERT INTO public.project_member VALUES (40, 5, 14, 'Member', '2025-01-02 19:35:01.633223+07');
+INSERT INTO public.project_member VALUES (41, 15, 14, 'Member', '2025-01-02 19:35:01.632962+07');
+INSERT INTO public.project_member VALUES (43, 16, 14, 'Member', '2025-01-02 19:35:01.63313+07');
+INSERT INTO public.project_member VALUES (45, 2, 14, 'Member', '2025-01-02 19:35:01.650599+07');
+INSERT INTO public.project_member VALUES (46, 10, 14, 'Member', '2025-01-02 19:35:01.650591+07');
+INSERT INTO public.project_member VALUES (44, 3, 14, 'Member', '2025-01-02 19:35:01.650591+07');
+INSERT INTO public.project_member VALUES (47, 4, 14, 'Member', '2025-01-02 19:35:01.63403+07');
+INSERT INTO public.project_member VALUES (48, 17, 15, 'Leader', '2025-01-02 19:36:28.025533+07');
+INSERT INTO public.project_member VALUES (49, 1, 15, 'Member', '2025-01-02 19:36:28.037066+07');
+INSERT INTO public.project_member VALUES (50, 2, 15, 'Member', '2025-01-02 19:36:28.037066+07');
+INSERT INTO public.project_member VALUES (51, 17, 16, 'Leader', '2025-01-02 19:39:01.48137+07');
+INSERT INTO public.project_member VALUES (52, 5, 16, 'Member', '2025-01-02 19:39:01.490512+07');
+INSERT INTO public.project_member VALUES (53, 17, 17, 'Leader', '2025-01-02 19:39:57.604435+07');
+INSERT INTO public.project_member VALUES (54, 4, 17, 'Member', '2025-01-02 19:39:57.618048+07');
+INSERT INTO public.project_member VALUES (55, 3, 17, 'Member', '2025-01-02 19:39:57.618048+07');
+INSERT INTO public.project_member VALUES (56, 17, 18, 'Leader', '2025-01-02 19:42:31.750959+07');
+INSERT INTO public.project_member VALUES (57, 7, 18, 'Member', '2025-01-02 19:42:31.761732+07');
+INSERT INTO public.project_member VALUES (58, 17, 19, 'Leader', '2025-01-02 19:43:17.192663+07');
+INSERT INTO public.project_member VALUES (59, 7, 19, 'Member', '2025-01-02 19:43:17.201534+07');
+INSERT INTO public.project_member VALUES (60, 17, 7, 'Member', '2025-01-02 23:39:15.700891+07');
+INSERT INTO public.project_member VALUES (61, 18, 20, 'Leader', '2025-01-04 03:22:28.381229+07');
+INSERT INTO public.project_member VALUES (62, 3, 20, 'Member', '2025-01-04 03:22:28.399724+07');
+INSERT INTO public.project_member VALUES (63, 1, 20, 'Member', '2025-01-04 03:22:28.399724+07');
+INSERT INTO public.project_member VALUES (64, 18, 21, 'Leader', '2025-01-04 03:23:28.173769+07');
+INSERT INTO public.project_member VALUES (65, 6, 21, 'Member', '2025-01-04 03:23:28.183681+07');
+INSERT INTO public.project_member VALUES (66, 5, 21, 'Member', '2025-01-04 03:23:28.183695+07');
+
+
+--
+-- TOC entry 3596 (class 0 OID 16464)
+-- Dependencies: 223
+-- Data for Name: tag; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.tag VALUES (1, 'Working');
+INSERT INTO public.tag VALUES (2, 'Studying');
+INSERT INTO public.tag VALUES (3, 'Health');
+INSERT INTO public.tag VALUES (4, 'Personal Development');
+INSERT INTO public.tag VALUES (5, 'Fitness');
+INSERT INTO public.tag VALUES (6, 'Hobbies');
+INSERT INTO public.tag VALUES (7, 'Family');
+INSERT INTO public.tag VALUES (8, 'Social');
+INSERT INTO public.tag VALUES (9, 'Finance');
+INSERT INTO public.tag VALUES (10, 'Travel');
+
+
+--
+-- TOC entry 3600 (class 0 OID 16531)
+-- Dependencies: 227
+-- Data for Name: task; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.task VALUES (5, '123', '123', 'pending', '2025-11-11', '2024-12-20 20:45:25.134366+07', '2024-12-20 20:45:25.134366+07', 1);
+INSERT INTO public.task VALUES (6, '123', '123', 'pending', '2025-11-11', '2024-12-20 20:57:09.354524+07', '2024-12-20 20:57:09.354524+07', 1);
+INSERT INTO public.task VALUES (7, '123', '123', 'pending', '2025-11-11', '2024-12-20 20:57:28.835719+07', '2024-12-20 20:57:28.835719+07', 1);
+INSERT INTO public.task VALUES (8, '123', '123', 'pending', '2025-11-11', '2024-12-20 20:58:54.010024+07', '2024-12-20 20:58:54.010024+07', 1);
+INSERT INTO public.task VALUES (9, '123', '123', 'pending', '2025-11-11', '2024-12-20 21:01:01.797227+07', '2024-12-20 21:01:01.797227+07', 1);
+INSERT INTO public.task VALUES (10, '123', '123', 'pending', '2025-11-11', '2024-12-20 21:02:55.183879+07', '2024-12-20 21:02:55.183879+07', 2);
+INSERT INTO public.task VALUES (11, '123', '123', 'pending', '2025-11-11', '2024-12-20 21:07:21.206974+07', '2024-12-20 21:07:21.206974+07', 2);
+INSERT INTO public.task VALUES (12, '123', '123', 'pending', '2025-11-11', '2024-12-20 21:08:48.978063+07', '2024-12-20 21:08:48.978063+07', 2);
+INSERT INTO public.task VALUES (28, '123', '123', 'completed', '2024-11-11', '2024-12-24 04:37:30.480793+07', '2024-12-24 04:37:36.479571+07', 3);
+INSERT INTO public.task VALUES (27, '12312321321', '123123123', 'completed', '2025-11-11', '2024-12-24 04:27:42.366579+07', '2024-12-24 05:00:21.291933+07', 3);
+INSERT INTO public.task VALUES (26, 'test', 'test', 'completed', '2025-11-11', '2024-12-24 04:12:28.479569+07', '2024-12-24 05:00:36.84156+07', 3);
+INSERT INTO public.task VALUES (24, 'test', '123', 'completed', '2025-11-11', '2024-12-24 03:50:13.363813+07', '2024-12-24 05:02:49.664992+07', 4);
+INSERT INTO public.task VALUES (22, 'test', 'test123', 'completed', '2025-11-11', '2024-12-23 20:45:54.710656+07', '2024-12-24 05:07:04.554949+07', 2);
+INSERT INTO public.task VALUES (13, '123', '123', 'completed', '2025-11-11', '2024-12-20 21:12:01.602516+07', '2024-12-24 05:09:45.336061+07', 2);
+INSERT INTO public.task VALUES (29, 'add', 'add', 'pending', '2025-11-11', '2024-12-24 05:15:59.453165+07', '2024-12-24 05:15:59.453165+07', 3);
+INSERT INTO public.task VALUES (31, 'add', 'add123', 'pending', '2024-12-25', '2024-12-24 06:14:55.312284+07', '2024-12-24 06:30:08.003536+07', 3);
+INSERT INTO public.task VALUES (30, '11', '111123', 'completed', '2024-12-23', '2024-12-24 05:16:14.782982+07', '2024-12-24 06:54:54.820149+07', 3);
+INSERT INTO public.task VALUES (33, 'test for real', '1231312', 'completed', '2024-12-24', '2024-12-24 06:30:37.994979+07', '2024-12-24 07:04:34.767839+07', 3);
+INSERT INTO public.task VALUES (35, '123', '123', 'pending', '2024-12-26', '2024-12-24 21:00:24.216352+07', '2024-12-24 21:00:24.216352+07', 2);
+INSERT INTO public.task VALUES (36, '123', '123', 'completed', '2024-12-27', '2024-12-24 21:00:51.008573+07', '2024-12-24 21:01:16.932078+07', 3);
+INSERT INTO public.task VALUES (37, 'Munwind', 'Gay VL', 'pending', '2025-11-11', '2024-12-24 21:13:31.217095+07', '2024-12-24 21:15:18.750475+07', 2);
+INSERT INTO public.task VALUES (41, 'Test Task 3', 'This is a test task with a future due date', 'pending', '2025-01-01', '2024-12-24 15:39:31.229634+07', '2024-12-24 15:39:31.229634+07', 3);
+INSERT INTO public.task VALUES (1, '1', '1', 'overdue', '2024-11-11', '2024-12-20 09:38:05.609457+07', '2024-12-20 09:38:05.609457+07', NULL);
+INSERT INTO public.task VALUES (2, '1', '1', 'overdue', '2024-11-11', '2024-12-20 09:46:00.278549+07', '2024-12-20 09:46:00.278549+07', 1);
+INSERT INTO public.task VALUES (3, '123', '123', 'overdue', '2024-12-19', '2024-12-20 11:46:49.069807+07', '2024-12-20 11:46:49.069807+07', 1);
+INSERT INTO public.task VALUES (4, '123', '123', 'overdue', '2024-11-11', '2024-12-20 11:49:03.112536+07', '2024-12-20 11:49:03.112536+07', 1);
+INSERT INTO public.task VALUES (34, '123', '123', 'overdue', '2024-12-23', '2024-12-24 06:55:13.359365+07', '2024-12-24 06:55:13.359365+07', 3);
+INSERT INTO public.task VALUES (39, 'Test Task 1', 'This is a test task with a past due date', 'overdue', '2024-12-01', '2024-12-24 15:39:31.229634+07', '2024-12-24 15:39:31.229634+07', 1);
+INSERT INTO public.task VALUES (40, 'Test Task 2', 'This is another test task with a past due date', 'overdue', '2024-12-05', '2024-12-24 15:39:31.229634+07', '2024-12-24 15:39:31.229634+07', 2);
+INSERT INTO public.task VALUES (42, 'Test Task 3', 'This task is overdue', 'overdue', '2024-12-10', '2024-12-24 16:17:25.183636+07', '2024-12-24 16:17:25.183636+07', 3);
+INSERT INTO public.task VALUES (45, '123', '123', 'pending', '2025-11-11', '2025-01-03 16:46:16.088458+07', '2025-01-03 16:46:16.088458+07', 2);
+INSERT INTO public.task VALUES (44, '123', '123', 'completed', '2025-11-11', '2025-01-03 00:53:52.227669+07', '2025-01-03 17:20:20.682926+07', 2);
+INSERT INTO public.task VALUES (46, 'test', 'test', 'pending', '2025-11-11', '2025-01-04 03:20:42.163314+07', '2025-01-04 03:20:42.163314+07', 2);
+
+
+--
+-- TOC entry 3609 (class 0 OID 16625)
+-- Dependencies: 236
+-- Data for Name: task_tag_link; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+
+
+--
+-- TOC entry 3590 (class 0 OID 16390)
+-- Dependencies: 217
+-- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.users VALUES (1, 'John Doe', 'johndoe@example.com', 'hashed_password_here', '2024-12-12 05:41:01.338789+07', '2024-12-12 05:41:01.338789+07');
+INSERT INTO public.users VALUES (2, 'Nguyen Trung Kien', 'hust@edu.vn', '$2a$11$ozR3sXhkYDhNHV7YtQVgQuCrkdhvZJrxsrGqDHSQrxB0UaY21R49K', '2024-12-12 08:16:17.845273+07', '2024-12-12 08:16:17.845366+07');
+INSERT INTO public.users VALUES (3, 'Nguyen Trung Kien', 'husta@gmail.com', '1112', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (4, 'Nguyen Trung Kien', 'kien@deptrai.vl', '$2a$11$93Bc2yhABfS1fxlaErEp0OEgHnJUvdxJFwl1Qg6dXSdWNoUifl84W', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (5, 'Kien', 'hust1@edu.vn', '$2a$11$cdiE030R8KvFwzKg.eAkGeJXnqHPnrMVPkksUyucT1HKLt/454JSC', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (6, 'Kien', 'hust2@edu.vn', '$2a$11$6XOPKZxWFA.t.zc/As/eXOM4aHsObVG0.3fNyNCIvRfpVAel2HjIO', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (7, 'Kien', 'hust3@edu.vn', '$2a$11$yH3o1mW4FitTEDR529FGceHcu.XVHns0.kMsrE0hRRcAO39NU5nRy', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (9, 'Person1', '1@gmail.com', '$2a$11$.B3/wK1mRklDDuBew8pDKu63I5irp3OK.F0071mi3IBWpFH0rl4gC', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (10, 'Nguyen Trung Kien', '123@gmail.com', '$2a$11$EygWD9lXLvwSc3yLEA0PnOqeLRaT9D4OmrB0cdWPp8yNILwEaOLWK', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (12, 'John Doe', 'john@example.com', 'securepassword123', '2024-12-19 15:20:04.338175+07', '2024-12-19 15:20:04.338175+07');
+INSERT INTO public.users VALUES (13, 'NTK', '4@gmail.com', '$2a$11$4nGR78Deamr6LoM3Nw220uEpbKAb.UrP2IlKBQuRZpf1kLeRbNVtW', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (14, 'Nguyen Trung Kien', '13@gmail.com', '$2a$11$M4qKLFfblC7c36tSsk.oDu7XDf4IuP8D3uhqw6GGYi7I.ce0L23jK', '-infinity', '-infinity');
+INSERT INTO public.users VALUES (15, 'Nguyen Trung Kien', 'K1@gmail.com', '$2a$11$xiSZC6dtHRoEJiWSP/c5Bu4y.xmbyOjNynfA6N1susVGxfRboQ96a', '2024-12-19 16:01:24.996968+07', '2024-12-19 16:01:24.996968+07');
+INSERT INTO public.users VALUES (16, 'Nguyen Trung Kien', '12312@gmail.com', '$2a$11$KCLd.DcgEgWbD6NV8/sjdOffPjGyqkznuVduPbrCl3VuRYrP5TlE.', '2024-12-20 09:37:40.728274+07', '2024-12-20 09:37:40.728274+07');
+INSERT INTO public.users VALUES (17, 'Munwind', 'lehaunoob@gmail.com', '$2a$11$zfkzKGWAhBoH1dAF2vsPwurEPgaZj3yPPXORK7lC0fWO0GB2dNvTG', '2025-01-02 19:32:02.442117+07', '2025-01-02 19:32:02.442117+07');
+INSERT INTO public.users VALUES (18, 'Pham Duy Hoang', 'munwind@gmail.com', '$2a$11$yjboTOPjP6Cwbuflvp.5ueyUbZRT2cBO0mrbQZHPIRs6S2KfyYQQq', '2025-01-04 03:08:57.656139+07', '2025-01-03 20:21:46.697761+07');
+INSERT INTO public.users VALUES (19, 'Nguyen Trung Kien', 'lehau123@gmail.com', '$2a$11$Uc/NNI.Hxv8DHhYUn6X9jusWcXjZ1fXCGD94tZ3hIpAKv2KI8dDIK', '2025-01-04 03:24:31.43885+07', '2025-01-04 03:24:31.43885+07');
+INSERT INTO public.users VALUES (8, 'Admin', 'admin@hust.edu.vn', '$2a$11$eP1//c30Knv9qLgQ2Q5nH.eH.1KmGgqygYBlk0fUAIGTkqyKMCK0C', '-infinity', '2025-02-14 23:24:22.561565+07');
+INSERT INTO public.users VALUES (20, 'Nguyen Trung Kien', 'kn14075@gmail.com', '$2a$11$1m9TawoxDFHuyEVOt4nv3uY56W5AsKMk3W/emsOE5XEquT.8ZDy6i', '2025-02-15 08:04:40.40518+07', '2025-02-15 08:04:40.40518+07');
+INSERT INTO public.users VALUES (21, 'Nguyen Trung Kien', 'trungkien11042004@gmail.com', '$2a$11$PdOx53LA0GPc6eEXVR4YzuxsDF0w0gi1l2O/C3hCa1R.GvK4ZYSOe', '2025-02-15 08:12:03.882768+07', '2025-02-15 08:12:03.882768+07');
+
+
+--
+-- TOC entry 3620 (class 0 OID 16823)
+-- Dependencies: 247
+-- Data for Name: active_chain; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+
+
+--
+-- TOC entry 3617 (class 0 OID 16790)
+-- Dependencies: 244
+-- Data for Name: active_session; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+
+
+--
+-- TOC entry 3613 (class 0 OID 16737)
+-- Dependencies: 240
+-- Data for Name: chain; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.chain VALUES (4, 'Update the overdue tasks', '0 0 * * *', 1, 0, true, false, false, NULL, NULL);
+
+
+--
+-- TOC entry 3619 (class 0 OID 16817)
+-- Dependencies: 246
+-- Data for Name: execution_log; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.execution_log VALUES (1, 1, 997, '2024-12-24 16:15:05.819061+07', '2024-12-24 16:15:05.82133+07', 280160123, -1, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'ERROR: permission denied for table task (SQLSTATE 42501)', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1003, '2024-12-24 16:16:05.796946+07', '2024-12-24 16:16:05.798336+07', 280160123, -1, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'ERROR: permission denied for table task (SQLSTATE 42501)', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1010, '2024-12-24 16:17:04.685713+07', '2024-12-24 16:17:04.687543+07', 280160123, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1017, '2024-12-24 16:18:04.687084+07', '2024-12-24 16:18:04.693798+07', 280160123, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 1', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1024, '2024-12-24 16:19:04.684644+07', '2024-12-24 16:19:04.686309+07', 280160123, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1030, '2024-12-24 16:20:04.687656+07', '2024-12-24 16:20:04.690801+07', 280160123, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1036, '2024-12-24 16:21:04.713704+07', '2024-12-24 16:21:04.71566+07', 280160123, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1045, '2024-12-24 16:25:11.391503+07', '2024-12-24 16:25:11.393484+07', 1018948962, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+INSERT INTO timetable.execution_log VALUES (1, 1, 1051, '2024-12-24 16:26:11.368898+07', '2024-12-24 16:26:11.372361+07', 1018948962, 0, true, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue''
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE
+    ', 'UPDATE 0', 'kazu');
+
+
+--
+-- TOC entry 3618 (class 0 OID 16810)
+-- Dependencies: 245
+-- Data for Name: log; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.log VALUES ('2024-12-24 14:54:45.973205+07', 1202760551, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:54:45.974387+07', 1202760551, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:54:45.975886+07', 1202760551, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:54:45.9977+07', 1202760551, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:55:45.976618+07', 1202760551, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:55:45.976723+07', 1202760551, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:57:14.105295+07', 1665506992, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:57:14.106461+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:57:14.108227+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:57:14.125849+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:58:14.109342+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:58:14.11008+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:59:14.110753+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 14:59:14.111057+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:00:14.111401+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:00:14.111559+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:01:14.111566+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:01:14.111619+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:02:14.112498+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:02:14.112592+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:03:14.11275+07', 1665506992, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:03:14.11282+07', 1665506992, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:11:18.36513+07', 15254006, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:11:18.366481+07', 15254006, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:11:18.367966+07', 15254006, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:11:18.388322+07', 15254006, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:12:18.369503+07', 15254006, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:12:18.369627+07', 15254006, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:13:18.369665+07', 15254006, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:13:18.369752+07', 15254006, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:14:18.371246+07', 15254006, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:14:18.371317+07', 15254006, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:15:28.138327+07', 297811074, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:15:28.13962+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:15:28.141119+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:15:28.161774+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:16:28.142352+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:16:28.142375+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:17:28.142286+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:17:28.142712+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:18:28.143043+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:18:28.143105+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:19:28.143644+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:19:28.143657+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:20:28.144226+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:20:28.144266+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:21:28.14491+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:21:28.144913+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:22:28.145083+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:22:28.145173+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:23:28.145168+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:23:28.145205+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:24:28.146939+07', 297811074, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 15:24:28.147043+07', 297811074, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.786843+07', 280160123, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.787882+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.789409+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.812777+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.814235+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.816613+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.818071+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.82012+07', 280160123, 'ERROR', 'kazu', 'Query', '{"err": {"Code": "42501", "File": "aclchk.c", "Hint": "", "Line": 2812, "Where": "", "Detail": "", "Message": "permission denied for table task", "Routine": "aclcheck_error", "Position": 0, "Severity": "ERROR", "TableName": "", "ColumnName": "", "SchemaName": "", "DataTypeName": "", "InternalQuery": "", "ConstraintName": "", "InternalPosition": 0, "SeverityUnlocalized": "ERROR"}, "pid": 26618, "sql": "\n        UPDATE public.task\n        SET status = ''overdue''\n        WHERE status = ''pending'' AND due_date < CURRENT_DATE\n    ", "args": [], "task": 1, "time": 1273811, "txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.820198+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.390419+07', 1018948962, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1045, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.392221+07', 1018948962, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1045, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.820337+07', 280160123, 'ERROR', 'kazu', 'Task execution failed', '{"task": 1, "txid": 997, "chain": 1, "error": {"Code": "42501", "File": "aclchk.c", "Hint": "", "Line": 2812, "Where": "", "Detail": "", "Message": "permission denied for table task", "Routine": "aclcheck_error", "Position": 0, "Severity": "ERROR", "TableName": "", "ColumnName": "", "SchemaName": "", "DataTypeName": "", "InternalQuery": "", "ConstraintName": "", "InternalPosition": 0, "SeverityUnlocalized": "ERROR"}}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.822043+07', 280160123, 'INFO', 'kazu', 'Ignoring task failure', '{"task": 1, "txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:15:05.82236+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 997, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.791231+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.791377+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.793032+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.794523+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.795866+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.797072+07', 280160123, 'ERROR', 'kazu', 'Query', '{"err": {"Code": "42501", "File": "aclchk.c", "Hint": "", "Line": 2812, "Where": "", "Detail": "", "Message": "permission denied for table task", "Routine": "aclcheck_error", "Position": 0, "Severity": "ERROR", "TableName": "", "ColumnName": "", "SchemaName": "", "DataTypeName": "", "InternalQuery": "", "ConstraintName": "", "InternalPosition": 0, "SeverityUnlocalized": "ERROR"}, "pid": 26620, "sql": "\n        UPDATE public.task\n        SET status = ''overdue''\n        WHERE status = ''pending'' AND due_date < CURRENT_DATE\n    ", "args": [], "task": 1, "time": 770502, "txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.797135+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.797252+07', 280160123, 'ERROR', 'kazu', 'Task execution failed', '{"task": 1, "txid": 1003, "chain": 1, "error": {"Code": "42501", "File": "aclchk.c", "Hint": "", "Line": 2812, "Where": "", "Detail": "", "Message": "permission denied for table task", "Routine": "aclcheck_error", "Position": 0, "Severity": "ERROR", "TableName": "", "ColumnName": "", "SchemaName": "", "DataTypeName": "", "InternalQuery": "", "ConstraintName": "", "InternalPosition": 0, "SeverityUnlocalized": "ERROR"}}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.79894+07', 280160123, 'INFO', 'kazu', 'Ignoring task failure', '{"task": 1, "txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:16:05.799303+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1003, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.678405+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.678794+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.68042+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.682408+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1010, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.683793+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1010, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.685468+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1010, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.685616+07', 280160123, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1010, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:17:04.690921+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1010, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.678881+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.679782+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.680686+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.68238+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1017, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.684659+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1017, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.691131+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1017, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.691366+07', 280160123, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1017, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:18:04.694812+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1017, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.679923+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.680347+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.681646+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.683553+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1024, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.684162+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1024, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.685685+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1024, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.685825+07', 280160123, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1024, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:19:04.696996+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1024, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.679382+07', 280160123, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.68054+07', 280160123, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.681792+07', 280160123, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.68401+07', 280160123, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1030, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.68601+07', 280160123, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1030, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.688953+07', 280160123, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1030, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.689147+07', 280160123, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1030, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:20:04.693448+07', 280160123, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1030, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.35784+07', 1018948962, 'INFO', 'kazu', 'Accepting asynchronous chains execution requests...', '{}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.359289+07', 1018948962, 'INFO', 'kazu', 'Retrieve scheduled chains to run @reboot', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.361044+07', 1018948962, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.384342+07', 1018948962, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.385989+07', 1018948962, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.389031+07', 1018948962, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1045, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.392397+07', 1018948962, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1045, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:25:11.394549+07', 1018948962, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1045, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.362206+07', 1018948962, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.363255+07', 1018948962, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.364507+07', 1018948962, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.367367+07', 1018948962, 'INFO', 'kazu', 'Starting task', '{"task": 1, "txid": 1051, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.36827+07', 1018948962, 'INFO', 'kazu', 'Switching to autonomous task mode', '{"task": 1, "txid": 1051, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.371316+07', 1018948962, 'INFO', 'kazu', 'Closing standalone session', '{"task": 1, "txid": 1051, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.371729+07', 1018948962, 'INFO', 'kazu', 'Task executed successfully', '{"task": 1, "txid": 1051, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:26:11.375039+07', 1018948962, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1051, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:27:11.361995+07', 1018948962, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:27:11.363055+07', 1018948962, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:27:11.363888+07', 1018948962, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:27:11.365676+07', 1018948962, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1059, "chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:28:11.363461+07', 1018948962, 'INFO', 'kazu', 'Retrieve interval chains to run', '{"count": 0}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:28:11.365032+07', 1018948962, 'INFO', 'kazu', 'Retrieve scheduled chains to run', '{"count": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:28:11.365833+07', 1018948962, 'INFO', 'kazu', 'Starting chain', '{"chain": 1}');
+INSERT INTO timetable.log VALUES ('2024-12-24 16:28:11.367365+07', 1018948962, 'INFO', 'kazu', 'Chain executed successfully', '{"txid": 1065, "chain": 1}');
+
+
+--
+-- TOC entry 3611 (class 0 OID 16719)
+-- Dependencies: 238
+-- Data for Name: migration; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.migration VALUES (0, '00259 Restart migrations for v4');
+INSERT INTO timetable.migration VALUES (1, '00305 Fix timetable.is_cron_in_time');
+INSERT INTO timetable.migration VALUES (2, '00323 Append timetable.delete_job function');
+INSERT INTO timetable.migration VALUES (3, '00329 Migration required for some new added functions');
+INSERT INTO timetable.migration VALUES (4, '00334 Refactor timetable.task as plain schema without tree-like dependencies');
+INSERT INTO timetable.migration VALUES (5, '00381 Rewrite active chain handling');
+INSERT INTO timetable.migration VALUES (6, '00394 Add started_at column to active_session and active_chain tables');
+INSERT INTO timetable.migration VALUES (7, '00417 Rename LOG database log level to INFO');
+INSERT INTO timetable.migration VALUES (8, '00436 Add txid column to timetable.execution_log');
+INSERT INTO timetable.migration VALUES (9, '00534 Use cron_split_to_arrays() in cron domain check');
+INSERT INTO timetable.migration VALUES (10, '00560 Alter txid column to bigint');
+INSERT INTO timetable.migration VALUES (11, '00573 Add ability to start a chain with delay');
+INSERT INTO timetable.migration VALUES (12, '00575 Add on_error handling');
+INSERT INTO timetable.migration VALUES (13, '00629 Add ignore_error column to timetable.execution_log');
+
+
+--
+-- TOC entry 3616 (class 0 OID 16777)
+-- Dependencies: 243
+-- Data for Name: parameter; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.parameter VALUES (2, 1, '[]');
+
+
+--
+-- TOC entry 3615 (class 0 OID 16760)
+-- Dependencies: 242
+-- Data for Name: task; Type: TABLE DATA; Schema: timetable; Owner: scheduler
+--
+
+INSERT INTO timetable.task VALUES (2, 4, 10, NULL, 'SQL', '
+        UPDATE public.task
+        SET status = ''overdue'', updated_at = CURRENT_TIMESTAMP
+        WHERE status = ''pending'' AND due_date < CURRENT_DATE;
+    ', NULL, NULL, true, true, 0);
+
+
+--
+-- TOC entry 3676 (class 0 OID 0)
+-- Dependencies: 228
+-- Name: comment_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.comment_id_seq', 7, true);
+
+
+--
+-- TOC entry 3677 (class 0 OID 0)
+-- Dependencies: 218
+-- Name: contacts_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.contacts_id_seq', 14, true);
+
+
+--
+-- TOC entry 3678 (class 0 OID 0)
+-- Dependencies: 248
+-- Name: logs_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.logs_id_seq', 20, true);
+
+
+--
+-- TOC entry 3679 (class 0 OID 0)
+-- Dependencies: 230
+-- Name: person_task_list_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.person_task_list_id_seq', 27, true);
+
+
+--
+-- TOC entry 3680 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: priority_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.priority_id_seq', 20, true);
+
+
+--
+-- TOC entry 3681 (class 0 OID 0)
+-- Dependencies: 234
+-- Name: project_assignment_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.project_assignment_id_seq', 3, true);
+
+
+--
+-- TOC entry 3682 (class 0 OID 0)
+-- Dependencies: 220
+-- Name: project_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.project_id_seq', 22, true);
+
+
+--
+-- TOC entry 3683 (class 0 OID 0)
+-- Dependencies: 232
+-- Name: project_member_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.project_member_id_seq', 70, true);
+
+
+--
+-- TOC entry 3684 (class 0 OID 0)
+-- Dependencies: 222
+-- Name: tag_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.tag_id_seq', 10, true);
+
+
+--
+-- TOC entry 3685 (class 0 OID 0)
+-- Dependencies: 226
+-- Name: task_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.task_id_seq', 47, true);
+
+
+--
+-- TOC entry 3686 (class 0 OID 0)
+-- Dependencies: 216
+-- Name: users_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.users_id_seq', 21, true);
+
+
+--
+-- TOC entry 3687 (class 0 OID 0)
+-- Dependencies: 239
+-- Name: chain_chain_id_seq; Type: SEQUENCE SET; Schema: timetable; Owner: scheduler
+--
+
+SELECT pg_catalog.setval('timetable.chain_chain_id_seq', 4, true);
+
+
+--
+-- TOC entry 3688 (class 0 OID 0)
+-- Dependencies: 241
+-- Name: task_task_id_seq; Type: SEQUENCE SET; Schema: timetable; Owner: scheduler
+--
+
+SELECT pg_catalog.setval('timetable.task_task_id_seq', 2, true);
+
+
+--
+-- TOC entry 3415 (class 2606 OID 16645)
+-- Name: __EFMigrationsHistory PK___EFMigrationsHistory; Type: CONSTRAINT; Schema: public; Owner: appuser
+--
+
+ALTER TABLE ONLY public."__EFMigrationsHistory"
+    ADD CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId");
+
+
+--
+-- TOC entry 3405 (class 2606 OID 16556)
+-- Name: comment comment_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.comment
+    ADD CONSTRAINT comment_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3391 (class 2606 OID 16410)
+-- Name: contacts contacts_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.contacts
+    ADD CONSTRAINT contacts_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3427 (class 2606 OID 25063)
+-- Name: logs logs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs
+    ADD CONSTRAINT logs_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3407 (class 2606 OID 16573)
+-- Name: person_task_list person_task_list_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.person_task_list
+    ADD CONSTRAINT person_task_list_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3399 (class 2606 OID 16480)
+-- Name: priority priority_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.priority
+    ADD CONSTRAINT priority_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3401 (class 2606 OID 16482)
+-- Name: priority priority_title_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.priority
+    ADD CONSTRAINT priority_title_key UNIQUE (title);
+
+
+--
+-- TOC entry 3411 (class 2606 OID 16609)
+-- Name: project_assignment project_assignment_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_assignment
+    ADD CONSTRAINT project_assignment_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3409 (class 2606 OID 16591)
+-- Name: project_member project_member_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_member
+    ADD CONSTRAINT project_member_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3393 (class 2606 OID 16449)
+-- Name: project project_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project
+    ADD CONSTRAINT project_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3395 (class 2606 OID 16469)
+-- Name: tag tag_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.tag
+    ADD CONSTRAINT tag_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3397 (class 2606 OID 16471)
+-- Name: tag tag_tag_name_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.tag
+    ADD CONSTRAINT tag_tag_name_key UNIQUE (tag_name);
+
+
+--
+-- TOC entry 3403 (class 2606 OID 16541)
+-- Name: task task_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task
+    ADD CONSTRAINT task_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3413 (class 2606 OID 16629)
+-- Name: task_tag_link task_tag_link_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task_tag_link
+    ADD CONSTRAINT task_tag_link_pkey PRIMARY KEY (task_id, tag_id);
+
+
+--
+-- TOC entry 3387 (class 2606 OID 16401)
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- TOC entry 3389 (class 2606 OID 16399)
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3419 (class 2606 OID 16750)
+-- Name: chain chain_chain_name_key; Type: CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.chain
+    ADD CONSTRAINT chain_chain_name_key UNIQUE (chain_name);
+
+
+--
+-- TOC entry 3421 (class 2606 OID 16748)
+-- Name: chain chain_pkey; Type: CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.chain
+    ADD CONSTRAINT chain_pkey PRIMARY KEY (chain_id);
+
+
+--
+-- TOC entry 3417 (class 2606 OID 16725)
+-- Name: migration migration_pkey; Type: CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.migration
+    ADD CONSTRAINT migration_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3425 (class 2606 OID 16784)
+-- Name: parameter parameter_pkey; Type: CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.parameter
+    ADD CONSTRAINT parameter_pkey PRIMARY KEY (task_id, order_id);
+
+
+--
+-- TOC entry 3423 (class 2606 OID 16771)
+-- Name: task task_pkey; Type: CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.task
+    ADD CONSTRAINT task_pkey PRIMARY KEY (task_id);
+
+
+--
+-- TOC entry 3444 (class 2620 OID 16679)
+-- Name: users set_created_at_trigger; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER set_created_at_trigger BEFORE INSERT ON public.users FOR EACH ROW EXECUTE FUNCTION public.set_created_at();
+
+
+--
+-- TOC entry 3445 (class 2620 OID 16681)
+-- Name: users set_updated_at_trigger; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER set_updated_at_trigger BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- TOC entry 3430 (class 2606 OID 16562)
+-- Name: comment comment_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.comment
+    ADD CONSTRAINT comment_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.task(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3431 (class 2606 OID 16557)
+-- Name: comment comment_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.comment
+    ADD CONSTRAINT comment_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3428 (class 2606 OID 16411)
+-- Name: contacts contacts_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.contacts
+    ADD CONSTRAINT contacts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3443 (class 2606 OID 25064)
+-- Name: logs logs_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs
+    ADD CONSTRAINT logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3432 (class 2606 OID 16579)
+-- Name: person_task_list person_task_list_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.person_task_list
+    ADD CONSTRAINT person_task_list_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.task(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3433 (class 2606 OID 16574)
+-- Name: person_task_list person_task_list_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.person_task_list
+    ADD CONSTRAINT person_task_list_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3436 (class 2606 OID 16615)
+-- Name: project_assignment project_assignment_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_assignment
+    ADD CONSTRAINT project_assignment_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.project(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3437 (class 2606 OID 16610)
+-- Name: project_assignment project_assignment_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_assignment
+    ADD CONSTRAINT project_assignment_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.task(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3438 (class 2606 OID 16620)
+-- Name: project_assignment project_assignment_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_assignment
+    ADD CONSTRAINT project_assignment_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3434 (class 2606 OID 16597)
+-- Name: project_member project_member_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_member
+    ADD CONSTRAINT project_member_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.project(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3435 (class 2606 OID 16592)
+-- Name: project_member project_member_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.project_member
+    ADD CONSTRAINT project_member_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3429 (class 2606 OID 16542)
+-- Name: task task_priority_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task
+    ADD CONSTRAINT task_priority_id_fkey FOREIGN KEY (priority_id) REFERENCES public.priority(id) ON DELETE SET NULL;
+
+
+--
+-- TOC entry 3439 (class 2606 OID 16635)
+-- Name: task_tag_link task_tag_link_tag_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task_tag_link
+    ADD CONSTRAINT task_tag_link_tag_id_fkey FOREIGN KEY (tag_id) REFERENCES public.tag(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3440 (class 2606 OID 16630)
+-- Name: task_tag_link task_tag_link_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.task_tag_link
+    ADD CONSTRAINT task_tag_link_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.task(id) ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3442 (class 2606 OID 16785)
+-- Name: parameter parameter_task_id_fkey; Type: FK CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.parameter
+    ADD CONSTRAINT parameter_task_id_fkey FOREIGN KEY (task_id) REFERENCES timetable.task(task_id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3441 (class 2606 OID 16772)
+-- Name: task task_chain_id_fkey; Type: FK CONSTRAINT; Schema: timetable; Owner: scheduler
+--
+
+ALTER TABLE ONLY timetable.task
+    ADD CONSTRAINT task_chain_id_fkey FOREIGN KEY (chain_id) REFERENCES timetable.chain(chain_id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- TOC entry 3629 (class 0 OID 0)
+-- Dependencies: 3628
+-- Name: DATABASE test; Type: ACL; Schema: -; Owner: postgres
+--
+
+GRANT CONNECT ON DATABASE test TO appuser;
+GRANT ALL ON DATABASE test TO scheduler;
+
+
+--
+-- TOC entry 3630 (class 0 OID 0)
+-- Dependencies: 6
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
+--
+
+GRANT ALL ON SCHEMA public TO scheduler;
+
+
+--
+-- TOC entry 3649 (class 0 OID 0)
+-- Dependencies: 227
+-- Name: TABLE task; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,UPDATE ON TABLE public.task TO scheduler;
+
+
+-- Completed on 2025-02-15 01:16:22 +07
+
+--
+-- PostgreSQL database dump complete
+--
+

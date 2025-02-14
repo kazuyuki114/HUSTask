@@ -1,0 +1,9 @@
+GET http://localhost:5059/weatherforecast/
+Accept: application/json
+User-Agent: IntelliJ HTTP Client/JetBrains Rider 2024.3
+Accept-Encoding: br, deflate, gzip, x-gzip
+
+<> 2024-12-11T221801.200.json
+
+###
+

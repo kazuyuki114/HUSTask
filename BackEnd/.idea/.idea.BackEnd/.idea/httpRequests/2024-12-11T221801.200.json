@@ -1,0 +1,32 @@
+[
+  {
+    "date": "2024-12-12",
+    "temperatureC": 43,
+    "temperatureF": 109,
+    "summary": "Scorching"
+  },
+  {
+    "date": "2024-12-13",
+    "temperatureC": 32,
+    "temperatureF": 89,
+    "summary": "Mild"
+  },
+  {
+    "date": "2024-12-14",
+    "temperatureC": -11,
+    "temperatureF": 13,
+    "summary": "Hot"
+  },
+  {
+    "date": "2024-12-15",
+    "temperatureC": 46,
+    "temperatureF": 114,
+    "summary": "Bracing"
+  },
+  {
+    "date": "2024-12-16",
+    "temperatureC": -6,
+    "temperatureF": 22,
+    "summary": "Freezing"
+  }
+]
