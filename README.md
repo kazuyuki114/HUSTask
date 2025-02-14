@@ -18,15 +18,13 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 - Set due dates and receive reminders for upcoming deadlines.
 
 ### 2. Team Task Assignment
-- **Project leaders** can:
-  - Create projects and assign tasks to team members.
-  - Define task priorities (**Low, Medium, High**).
-  - Add deadlines and instructions for each task.
+- Create projects and assign tasks to team members.
+- Define task priorities (**Low, Medium, High**).
+- Add deadlines and instructions for each task.
 
 ### 3. Task Monitoring
 - Track task progress using a **Kanban-style workflow view**.
 - View task status (**To-Do, In Progress, Done**).
-- Monitor task completion rates for team members.
 
 ### 4. User Roles
 - **Project Leader**:  
@@ -40,7 +38,7 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 - Notify team members of **new tasks** or **approaching deadlines**.
 - Provide project leaders with **progress updates** or **overdue task alerts**.
 
-### 6. Reporting
+### 6. Reporting (Not available yet)
 - Generate simple **reports** for task statuses and team performance.
 - View **historical data** for completed projects.
 
