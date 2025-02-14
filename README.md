@@ -54,7 +54,6 @@ Built with **Vue.js** for the frontend, **ASP.NET Core** for the backend, and **
 
 ### Backend:
 - **ASP.NET Core**: A cross-platform framework for building robust and scalable RESTful APIs.
-- **SignalR**: For real-time notifications and updates.
 
 ### Database:
 - **PostgreSQL**: A reliable and scalable relational database for storing tasks, users, and projects.
