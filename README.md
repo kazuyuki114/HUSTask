@@ -1,9 +1,17 @@
 # HUSTask
 
 A simple yet powerful web application for personal and team task management, enabling individuals and project leaders to stay organized and monitor task progress effectively.
-![Home Page](docs/image/homepage.png)
-![Task Mangament Site](docs/image/app.png)
+<p align="center">
+  <img src="docs/image/homepage.png" width="500">
+  <br>
+  <b>Homepage Screenshot</b>
+</p>
 
+<p align="center">
+  <img src="docs/image/app.png" width="500">
+  <br>
+  <b>Task Screenshot</b>
+</p>
 ## Project Description
 
 HUSTask is a task management web application designed to cater to both individual users and teams. It allows individuals to manage their personal tasks efficiently while providing project leaders with tools to assign tasks to team members, track progress, and ensure deadlines are met. 
