@@ -2,13 +2,13 @@
 
 A simple yet powerful web application for personal and team task management, enabling individuals and project leaders to stay organized and monitor task progress effectively.
 <p align="center">
-  <img src="docs/image/homepage.png" width="500">
+  <img src="docs/image/homepage.png" width="800">
   <br>
   <b>Homepage Screenshot</b>
 </p>
 
 <p align="center">
-  <img src="docs/image/app.png" width="500">
+  <img src="docs/image/app.png" width="800">
   <br>
   <b>Task Screenshot</b>
 </p>
